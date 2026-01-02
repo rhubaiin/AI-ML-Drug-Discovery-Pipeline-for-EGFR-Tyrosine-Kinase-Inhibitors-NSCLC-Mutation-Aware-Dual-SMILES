@@ -49,7 +49,7 @@ print("="*80)
 print("\nLoading datasets...")
 df_train = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/df_combo_tki_ed_smiles_lig_activity_validated_dock.csv')
 df_control = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/egfr_tki_valid_cleaned.csv')
-df_drugs = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/drugs.csv')
+df_drugs = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/new_ligands.csv')
 
 df_train.columns = df_train.columns.str.strip()
 
