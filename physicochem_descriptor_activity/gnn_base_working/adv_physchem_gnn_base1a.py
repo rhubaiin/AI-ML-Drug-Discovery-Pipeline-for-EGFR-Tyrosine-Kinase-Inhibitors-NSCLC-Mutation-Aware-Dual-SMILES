@@ -1,21 +1,4 @@
-﻿#!/usr/bin/env python3
-"""
-adv_physchem_gnn_base1.py
-
-Integration of MolCLR (Molecular Contrastive Learning of Representations) GNN
-with the hierarchical physicochemical model from adv_physchem5f2.py.
-
-Key changes from adv_physchem5f2.py:
-1. MolCLR GINet for base molecular embeddings (fine-tunable)
-2. Trainable head layers per ligand-mutant pair
-3. GNN embeddings integrated at Priority 1 layer
-4. RNN-LSTM processes combined embeddings
-
-Requirements:
-- torch, torch-geometric, torch-scatter, torch-sparse
-- rdkit, tensorflow, transformers
-"""
-
+﻿
 import os
 import sys
 import pickle
@@ -25,8 +8,7 @@ from loguru import logger
 
 # TensorFlow/Keras imports
 import tensorflow as tf
-# Force TensorFlow to use CPU to avoid CuDNN version mismatch errors
-# (PyTorch will still use GPU if available for the expensive GNN parts)
+
 try:
     tf.config.set_visible_devices([], 'GPU')
     print("TensorFlow configured to use CPU (avoiding CuDNN mismatch)")
@@ -94,13 +76,19 @@ logger.add("adv_physchem_gnn_{time}.txt", rotation="500 MB", retention="10 days"
 
 
 print("="*80)
-print("MolCLR-GNN INTEGRATED HIERARCHICAL MODEL")
+print("MolCLR-GNN INTEGRATED HIERARCHICAL RNN LTSM MODEL")
 print("Fine-tunable GNN + Priority-Gated Architecture + RNN-LSTM")
 print("="*80)
 
 # =============================================================================
 # MolCLR GINet Architecture (from yuyangw/MolCLR)
 # =============================================================================
+
+#Assumptions:
+#1. Adding a GNN base embedding to hierchical features at priority 1 improves performance and accuracy
+#2. Adding df_train dataset ligands and mutants GNN generated embeddings without fine tuning is sufficient for initial testing
+#3. Direct concatentation of GNN embeddings nodes and edges with hierarchical features preserves feature integrity
+#4. The final head includes the Hierarchical and RNN-LSTM layers on top of GNN embeddings while preserving ligand mutant subtrcuture sequence 
 
 NUM_ATOM_TYPE = 119  # including mask tokens
 NUM_CHIRALITY_TAG = 3
@@ -1015,7 +1003,7 @@ def keras_main():
                scaled['inter_interaction'], scaled['intra_interaction'],
                scaled['mut_inter'], scaled['lig_inter'], scaled['mut_intra'], scaled['lig_intra']],
             y={'activity_output': y1_scaled, 'docking_output': y2_scaled},
-            epochs=100,
+            epochs=50,
             batch_size=32,
             validation_split=0.2,
             callbacks=[checkpoint, early_stop],
@@ -1049,7 +1037,7 @@ def keras_main():
     rnn_history = rnn_model.fit(
         x=sequential_embs,
         y={'final_activity_output': y1_scaled, 'final_docking_output': y2_scaled},
-        epochs=150,
+        epochs=50,
         batch_size=32,
         validation_split=0.2,
         callbacks=[rnn_checkpoint, rnn_early_stop],
@@ -1245,4 +1233,8 @@ if __name__ == "__main__":
     else:
         keras_main()
 
+#TODO
+# 1. Conduct fine tuning using generated embedddings from of ligand and mutants in df_train dataset 
+# 2. Connect the GNN embeddings precisely to intermolecular and intramolecuar features off the hierachicaal features
+# 3. Experiment with different GNN pre-trained models and architectures 
 
