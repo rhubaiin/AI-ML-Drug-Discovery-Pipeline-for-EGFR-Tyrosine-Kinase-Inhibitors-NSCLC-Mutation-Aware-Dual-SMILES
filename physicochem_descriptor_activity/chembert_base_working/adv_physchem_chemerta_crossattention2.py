@@ -50,18 +50,143 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 np.random.seed(42)
 tf.random.set_seed(42)
 
-import importlib.util
-# Adjust path if necessary, assuming same directory structure
-script_dir = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location('adv_physchem5f2_mod', os.path.join(script_dir, 'adv_physchem5f2.py'))
-adv5f2 = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(adv5f2)
 
-safe_divide = getattr(adv5f2, 'safe_divide')
-generate_lig_inter_features = getattr(adv5f2, 'generate_lig_inter_features')
-generate_lig_intra_features = getattr(adv5f2, 'generate_lig_intra_features')
-generate_mut_inter_features = getattr(adv5f2, 'generate_mut_inter_features')
-generate_mut_intra_features = getattr(adv5f2, 'generate_mut_intra_features')
+# Fixed safe_divide and feature generation functions
+def safe_divide(numerator, denominator, default=0.0):
+    """Safe division with default value for zero denominator"""
+    if isinstance(denominator, (int, float)):
+        return numerator / denominator if denominator != 0 else default
+    else:
+        result = np.where(denominator != 0, numerator / denominator, default)
+        return result
+
+def generate_lig_inter_features(smiles): #Intermolecular Ligand, input smiles ligand, returns np array
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    
+    features = []
+    
+    try:
+        #Hydrogen Bonding
+        features.append(Lipinski.NumHDonors(mol))
+        features.append(Lipinski.NumHAcceptors(mol))
+        features.append(Lipinski.NHOHCount(mol))
+        features.append(Lipinski.NOCount(mol))
+        features.append(rdMolDescriptors.CalcNumHBD(mol))
+        features.append(rdMolDescriptors.CalcNumHBA(mol))
+        
+        #Electrostatic bonding
+        features.append(Descriptors.MaxPartialCharge(mol))
+        features.append(Descriptors.MinPartialCharge(mol))
+        features.append(Descriptors.MaxAbsPartialCharge(mol))
+        features.append(Descriptors.MaxPartialCharge(mol) - Descriptors.MinPartialCharge(mol))
+        features.append(Descriptors.MinAbsPartialCharge(mol))
+        
+        #Polar surface
+        features.append(MolSurf.TPSA(mol))
+        
+        features.append(MolSurf.LabuteASA(mol))
+
+        features.append(Crippen.MolMR(mol))
+        
+        #Size & Rigidity
+        features.append(Descriptors.MolWt(mol))
+        features.append(Lipinski.HeavyAtomCount(mol))
+        features.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+        
+        features.append(Crippen.MolLogP(mol))
+        features.append(Descriptors.FractionCSP3(mol))
+        features.append(Lipinski.NumAromaticRings(mol))
+        aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
+        features.append(aromatic_atoms)
+        
+        # Pi-Pi stacking 
+        features.append(Descriptors.NumAromaticCarbocycles(mol))
+        features.append(Descriptors.NumAromaticHeterocycles(mol))
+
+        #Halogen
+        features.append(Fragments.fr_halogen(mol))
+
+        #Flexibility
+        features.append(Lipinski.NumRotatableBonds(mol))
+
+        return np.array(features)
+        
+    except Exception as e:
+        print(f"Error in lig_inter: {str(e)}")
+        return None
+
+def generate_mut_inter_features(smiles):
+    return generate_lig_inter_features(smiles)
+
+def generate_lig_intra_features(smiles): #Intramolecular Ligand
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    
+    features = []
+    
+    try:
+        #Covalent bond
+        num_bonds = mol.GetNumBonds()
+        features.append(num_bonds)
+        
+        single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
+        double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
+        triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
+        aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
+        features.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
+        
+        avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
+        features.append(avg_bond_order)
+        
+        #Rigidity
+        features.append(Lipinski.NumRotatableBonds(mol))
+        features.append(Lipinski.RingCount(mol))
+        features.append(Lipinski.NumAromaticRings(mol))
+        
+        rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
+        fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
+        features.append(fraction_rigid)
+        
+        # Pi-Pi bonding 
+        features.append(Descriptors.NumAromaticCarbocycles(mol))
+        features.append(Descriptors.NumAromaticHeterocycles(mol))
+        
+        #Hybridization
+        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
+        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
+        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
+        features.extend([sp_carbons, sp2_carbons, sp3_carbons])
+        
+        #Ring strain
+        ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
+        avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
+        min_ring_size = min(ring_sizes) if ring_sizes else 0
+        features.extend([avg_ring_size, min_ring_size])
+        
+        three_member_rings = sum(1 for size in ring_sizes if size == 3)
+        four_member_rings = sum(1 for size in ring_sizes if size == 4)
+        features.extend([three_member_rings, four_member_rings])
+        
+        #Complexity
+        features.append(GraphDescriptors.BertzCT(mol))
+        features.append(GraphDescriptors.Kappa1(mol))
+        features.append(GraphDescriptors.Kappa2(mol))
+        features.append(GraphDescriptors.Kappa3(mol))
+        features.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
+        features.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
+        
+        return np.array(features)
+        
+    except Exception as e:
+        print(f"Error in lig_intra: {str(e)}")
+        return None
+
+def generate_mut_intra_features(smiles):
+    return generate_lig_intra_features(smiles)
+
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
