@@ -171,104 +171,6 @@ print("Simple Neural Network with Advanced Physicochemical Descriptors")
 print("Feed-Forward Neural Network Model")
 print("="*80)
 
-# === Load Data ===
-print("\nLoading datasets...")
-script_dir = os.path.dirname(os.path.abspath(__file__))
-df_train = pd.read_csv(os.path.join(script_dir, '..', 'data', 'manual_egfr3_mini_dock_fixed.csv'))
-df_control = pd.read_csv(os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv'))
-df_drugs = pd.read_csv(os.path.join(script_dir, '..', 'data', 'drugs.csv'))
-
-df_train.columns = df_train.columns.str.strip()
-
-#smiles for feature capture of ligand and mutation protein substructures
-ligand_smiles = df_train['smiles']
-full_smiles = df_train['smiles_full_egfr']
-mutation_smiles = df_train['smiles 718_862_atp_pocket']
-mut_hinge_p_loop = df_train['smiles_p_loop']
-mut_helix = df_train['smiles_c_helix']
-mut_dfg_a_loop = df_train['smiles_l858r_a_loop_dfg_motif']
-mut_hrd_cat = df_train['smiles_catalytic_hrd_motif']
-
-mutant = df_train['tkd'] #label for mutation type
-
-activity_values = df_train['standard value'] #y_train1 target
-docking_values = df_train['dock'] #y_train2 target
-
-control_smiles = df_control['smiles_control']
-control_name = df_control['id']
-drug_smiles = df_drugs['smiles']
-
-print(f"Training samples: {len(ligand_smiles)}")
-print(f"Control samples: {len(control_smiles)}")
-print(f"Drug samples: {len(drug_smiles)}")
-
-# Data Validation
-print("\n" + "="*80)
-print("DATA VALIDATION")
-print("="*80)
-
-mutation_site_columns = {
-    'Full_SMILES': full_smiles,
-    'ATP_POCKET': mutation_smiles,
-    'P_LOOP_HINGE': mut_hinge_p_loop,
-    'C_HELIX': mut_helix,
-    'DFG_A_LOOP': mut_dfg_a_loop,
-    'HRD_CAT': mut_hrd_cat
-}
-
-for site_name, site_series in mutation_site_columns.items():
-    missing_count = site_series.isna().sum()
-    print(f"  {site_name:15s}: {missing_count:4d} missing SMILES ({missing_count/len(site_series)*100:.2f}%)")
-
-# Filter to valid samples
-valid_mask = ~(
-    ligand_smiles.isna() | 
-    full_smiles.isna() |
-    mutation_smiles.isna() | 
-    mut_hinge_p_loop.isna() | 
-    mut_helix.isna() | 
-    mut_dfg_a_loop.isna() | 
-    mut_hrd_cat.isna() | 
-    activity_values.isna() |
-    docking_values.isna() 
-)
-
-valid_sample_count = valid_mask.sum()
-print(f"\n✓ Valid samples: {valid_sample_count}/{len(df_train)} ({valid_sample_count/len(df_train)*100:.2f}%)")
-
-if valid_sample_count == 0:
-    print("\n❌ ERROR: No complete samples found!")
-    sys.exit(1)
-
-df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
-
-
-ligand_smiles_valid = df_train_valid['smiles']
-full_smiles_valid = df_train_valid['smiles_full_egfr']
-mutation_smiles_valid = df_train_valid['smiles 718_862_atp_pocket']
-mut_hinge_p_loop_valid = df_train_valid['smiles_p_loop']
-mut_helix_valid = df_train_valid['smiles_c_helix']
-mut_dfg_a_loop_valid = df_train_valid['smiles_l858r_a_loop_dfg_motif']
-mut_hrd_cat_valid = df_train_valid['smiles_catalytic_hrd_motif']
-mutant_valid = df_train_valid['tkd']
-
-activity_values_valid = df_train_valid['standard value']
-activity_values2_valid = df_train_valid['dock'].values
-
-# Create unique mutation profiles
-mutation_profile_columns = [
-    'smiles_full_egfr',
-    'smiles 718_862_atp_pocket',
-    'smiles_p_loop', 
-    'smiles_c_helix',
-    'smiles_l858r_a_loop_dfg_motif',
-    'smiles_catalytic_hrd_motif',
-    'tkd'
-]
-
-unique_mutation_profiles = df_train_valid[mutation_profile_columns].drop_duplicates(subset=['tkd']).reset_index(drop=True)
-print(f"Unique mutation profiles: {len(unique_mutation_profiles)}")
-
 #Division for custom interaction features using intermolecular and intramolecular forces
 def safe_divide(numerator, denominator, default=0.0):
     """Safe division with default value for zero denominator"""
@@ -621,11 +523,116 @@ def get_ligand_features(smiles_series):
 # MAIN SCRIPT
 # ============================================================================
 
-def main():
+def main(output_dir='.', train_data=None, control_data=None, drug_data=None):
+    os.makedirs(output_dir, exist_ok=True)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if train_data is None:
+        train_data = os.path.join(script_dir, '..', 'data', 'manual_egfr3_mini_dock_fixed.csv')
+    if control_data is None:
+        control_data = os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv')
+    if drug_data is None:
+        drug_data = os.path.join(script_dir, '..', 'data', 'drugs.csv')
+
+    # === Load Data ===
+    print("\nLoading datasets...")
+    df_train = pd.read_csv(train_data)
+    df_control = pd.read_csv(control_data)
+    df_drugs = pd.read_csv(drug_data)
+
+    df_train.columns = df_train.columns.str.strip()
+
+    #smiles for feature capture of ligand and mutation protein substructures
+    ligand_smiles = df_train['smiles']
+    full_smiles = df_train['smiles_full_egfr']
+    mutation_smiles = df_train['smiles 718_862_atp_pocket']
+    mut_hinge_p_loop = df_train['smiles_p_loop']
+    mut_helix = df_train['smiles_c_helix']
+    mut_dfg_a_loop = df_train['smiles_l858r_a_loop_dfg_motif']
+    mut_hrd_cat = df_train['smiles_catalytic_hrd_motif']
+
+    mutant = df_train['tkd'] #label for mutation type
+
+    activity_values = df_train['standard value'] #y_train1 target
+    docking_values = df_train['dock'] #y_train2 target
+
+    control_smiles = df_control['smiles_control']
+    control_name = df_control['id']
+    drug_smiles = df_drugs['smiles']
+
+    print(f"Training samples: {len(ligand_smiles)}")
+    print(f"Control samples: {len(control_smiles)}")
+    print(f"Drug samples: {len(drug_smiles)}")
+
+    # Data Validation
+    print("\n" + "="*80)
+    print("DATA VALIDATION")
+    print("="*80)
+
+    mutation_site_columns = {
+        'Full_SMILES': full_smiles,
+        'ATP_POCKET': mutation_smiles,
+        'P_LOOP_HINGE': mut_hinge_p_loop,
+        'C_HELIX': mut_helix,
+        'DFG_A_LOOP': mut_dfg_a_loop,
+        'HRD_CAT': mut_hrd_cat
+    }
+
+    for site_name, site_series in mutation_site_columns.items():
+        missing_count = site_series.isna().sum()
+        print(f"  {site_name:15s}: {missing_count:4d} missing SMILES ({missing_count/len(site_series)*100:.2f}%)")
+
+    # Filter to valid samples
+    valid_mask = ~(
+        ligand_smiles.isna() |
+        full_smiles.isna() |
+        mutation_smiles.isna() |
+        mut_hinge_p_loop.isna() |
+        mut_helix.isna() |
+        mut_dfg_a_loop.isna() |
+        mut_hrd_cat.isna() |
+        activity_values.isna() |
+        docking_values.isna()
+    )
+
+    valid_sample_count = valid_mask.sum()
+    print(f"\n Valid samples: {valid_sample_count}/{len(df_train)} ({valid_sample_count/len(df_train)*100:.2f}%)")
+
+    if valid_sample_count == 0:
+        print("\n ERROR: No complete samples found!")
+        sys.exit(1)
+
+    df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
+
+    ligand_smiles_valid = df_train_valid['smiles']
+    full_smiles_valid = df_train_valid['smiles_full_egfr']
+    mutation_smiles_valid = df_train_valid['smiles 718_862_atp_pocket']
+    mut_hinge_p_loop_valid = df_train_valid['smiles_p_loop']
+    mut_helix_valid = df_train_valid['smiles_c_helix']
+    mut_dfg_a_loop_valid = df_train_valid['smiles_l858r_a_loop_dfg_motif']
+    mut_hrd_cat_valid = df_train_valid['smiles_catalytic_hrd_motif']
+    mutant_valid = df_train_valid['tkd']
+
+    activity_values_valid = df_train_valid['standard value']
+    activity_values2_valid = df_train_valid['dock'].values
+
+    # Create unique mutation profiles
+    mutation_profile_columns = [
+        'smiles_full_egfr',
+        'smiles 718_862_atp_pocket',
+        'smiles_p_loop',
+        'smiles_c_helix',
+        'smiles_l858r_a_loop_dfg_motif',
+        'smiles_catalytic_hrd_motif',
+        'tkd'
+    ]
+
+    unique_mutation_profiles = df_train_valid[mutation_profile_columns].drop_duplicates(subset=['tkd']).reset_index(drop=True)
+    print(f"Unique mutation profiles: {len(unique_mutation_profiles)}")
+
     print("\n" + "="*80)
     print("STAGE 1: GENERATE FEATURES WITH MUTANT INTEGER IDS")
     print("="*80)
-    
+
 
     # Encode mutations as integers (0 to N-1)
     mutation_names = mutant_valid.unique()
@@ -692,7 +699,7 @@ def main():
     model.summary()
         
     checkpoint = ModelCheckpoint(
-        'feedforward_model.h5',
+        os.path.join(output_dir, 'feedforward_model.h5'),
         monitor='val_loss',
         save_best_only=True,
         verbose=1
@@ -727,17 +734,17 @@ def main():
     
     # Save encoder and scalers
     import pickle
-    with open('mutant_encoder.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'mutant_encoder.pkl'), 'wb') as f:
         pickle.dump(mutant_encoder, f)
-    with open('mutant_mapping.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'mutant_mapping.pkl'), 'wb') as f:
         pickle.dump(mutant_mapping, f)
-    with open('feature_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'feature_scalers.pkl'), 'wb') as f:
         pickle.dump(scalers, f)
-    with open('y_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'y_scalers.pkl'), 'wb') as f:
         pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
-    
+
     # Save mutation profiles
-    unique_mutation_profiles.to_csv('mutation_profiles.csv', index=False)
+    unique_mutation_profiles.to_csv(os.path.join(output_dir, 'mutation_profiles.csv'), index=False)
     
     # ===== STAGE 3: PREDICTIONS =====
     print("\n" + "="*80)
@@ -748,7 +755,7 @@ def main():
     all_drug_results = []
     
     # Load the best model
-    model = load_model('feedforward_model.h5', compile=False)
+    model = load_model(os.path.join(output_dir, 'feedforward_model.h5'), compile=False)
     model.compile(
         optimizer=Adam(learning_rate=0.001),
         loss={'activity_output': 'mean_squared_error', 'docking_output': 'mean_squared_error'},
@@ -867,8 +874,8 @@ def main():
     df_control_results = pd.DataFrame(all_control_results)
     df_drug_results = pd.DataFrame(all_drug_results)
     
-    df_control_results.to_csv('control_predictions.csv', index=False)
-    df_drug_results.to_csv('drug_predictions.csv', index=False)
+    df_control_results.to_csv(os.path.join(output_dir, 'control_predictions.csv'), index=False)
+    df_drug_results.to_csv(os.path.join(output_dir, 'drug_predictions.csv'), index=False)
     
     print(f"✓ Control results: {len(df_control_results)} predictions saved")
     print(f"✓ Drug results: {len(df_drug_results)} predictions saved")
@@ -928,7 +935,7 @@ def main():
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'training_history.png'), dpi=300, bbox_inches='tight')
     plt.show()
     
     print("✓ Training history plot saved: training_history.png")
@@ -940,13 +947,22 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Simple Feed-Forward NN with Advanced Physicochemical Descriptors')
+    parser.add_argument('--output_dir', type=str, default='.', help='Directory to save all outputs')
+    parser.add_argument('--train_data', type=str, default=None, help='Training CSV path')
+    parser.add_argument('--control_data', type=str, default=None, help='Control compounds CSV path')
+    parser.add_argument('--drug_data', type=str, default=None, help='Drug compounds CSV path')
+    args = parser.parse_args()
+
     print("\n" + "="*80)
     print("STARTING FEED-FORWARD MODEL EXECUTION")
     print("="*80)
     try:
-        main()
+        main(output_dir=args.output_dir, train_data=args.train_data,
+             control_data=args.control_data, drug_data=args.drug_data)
     except Exception as e:
-        print(f"\n❌ ERROR: {str(e)}")
+        print(f"\n ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

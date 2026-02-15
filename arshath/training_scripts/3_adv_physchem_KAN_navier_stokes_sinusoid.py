@@ -86,102 +86,6 @@ print("RNN-LSTM-KAN INTEGRATED HIERARCHICAL MODEL FOR ADVANCED PHYSICOCHEMICAL D
 print("Sequential Training: ATP_POCKET → P_LOOP → C_HELIX → DFG_A_LOOP → HRD_CAT")
 print("="*80)
 
-# === Load Data ===
-print("\nLoading datasets...")
-script_dir = os.path.dirname(os.path.abspath(__file__))
-df_train = pd.read_csv(os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv'))
-df_control = pd.read_csv(os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv'))
-df_drugs = pd.read_csv(os.path.join(script_dir, '..', 'data', 'drugs.csv'))
-
-df_train.columns = df_train.columns.str.strip()
-
-#Substructure smiles for feature capture of mutation protein
-ligand_smiles = df_train['smiles']
-full_smiles = df_train['smiles_full_egfr']
-mutation_smiles = df_train['smiles 718_862_atp_pocket']
-mut_hinge_p_loop = df_train['smiles_p_loop']
-mut_helix = df_train['smiles_c_helix']
-mut_dfg_a_loop = df_train['smiles_l858r_a_loop_dfg_motif']
-mut_hrd_cat = df_train['smiles_catalytic_hrd_motif']
-
-mutant = df_train['tkd']
-
-activity_values = df_train['standard value'] #y_train1
-docking_values = df_train['dock'] #y_train2
-
-control_smiles = df_control['smiles_control']
-control_name = df_control['id']
-drug_smiles = df_drugs['smiles']
-
-print(f"Training samples: {len(ligand_smiles)}")
-print(f"Control samples: {len(control_smiles)}")
-print(f"Drug samples: {len(drug_smiles)}")
-
-# Data Validation
-print("\n" + "="*80)
-print("DATA VALIDATION")
-print("="*80)
-
-mutation_site_columns = {
-    'Full_SMILES': full_smiles,
-    'ATP_POCKET': mutation_smiles,
-    'P_LOOP_HINGE': mut_hinge_p_loop,
-    'C_HELIX': mut_helix,
-    'DFG_A_LOOP': mut_dfg_a_loop,
-    'HRD_CAT': mut_hrd_cat
-}
-
-for site_name, site_series in mutation_site_columns.items():
-    missing_count = site_series.isna().sum()
-    print(f"  {site_name:15s}: {missing_count:4d} missing SMILES ({missing_count/len(site_series)*100:.2f}%)")
-
-# Filter to valid samples
-valid_mask = ~(
-    ligand_smiles.isna() | 
-    full_smiles.isna() |
-    mutation_smiles.isna() | 
-    mut_hinge_p_loop.isna() | 
-    mut_helix.isna() | 
-    mut_dfg_a_loop.isna() | 
-    mut_hrd_cat.isna() | 
-    activity_values.isna() |
-    docking_values.isna() 
-)
-
-valid_sample_count = valid_mask.sum()
-print(f"\n✓ Valid samples: {valid_sample_count}/{len(df_train)} ({valid_sample_count/len(df_train)*100:.2f}%)")
-
-if valid_sample_count == 0:
-    print("\n✗ ERROR: No complete samples found!")
-    sys.exit(1)
-
-df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
-
-ligand_smiles_valid = df_train_valid['smiles']
-full_smiles_valid = df_train_valid['smiles_full_egfr']
-mutation_smiles_valid = df_train_valid['smiles 718_862_atp_pocket']
-mut_hinge_p_loop_valid = df_train_valid['smiles_p_loop']
-mut_helix_valid = df_train_valid['smiles_c_helix']
-mut_dfg_a_loop_valid = df_train_valid['smiles_l858r_a_loop_dfg_motif']
-mut_hrd_cat_valid = df_train_valid['smiles_catalytic_hrd_motif']
-mutant_valid = df_train_valid['tkd']
-
-activity_values_valid = df_train_valid['standard value']
-activity_values2_valid = df_train_valid['dock'].values
-
-# Create unique mutation profiles
-mutation_profile_columns = [
-    'smiles_full_egfr',
-    'smiles 718_862_atp_pocket',
-    'smiles_p_loop', 
-    'smiles_c_helix',
-    'smiles_l858r_a_loop_dfg_motif',
-    'smiles_catalytic_hrd_motif',
-    'tkd'
-]
-
-unique_mutation_profiles = df_train_valid[mutation_profile_columns].drop_duplicates(subset=['tkd']).reset_index(drop=True)
-print(f"Unique mutation profiles: {len(unique_mutation_profiles)}")
 
 #Division for custom interaction features using intermolecular and intramolecular forces
 def safe_divide(numerator, denominator, default=0.0):
@@ -1176,7 +1080,112 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
 # MAIN WORKFLOW
 # ============================================================================
 
-def main():
+def main(output_dir='.', train_data=None, control_data=None, drug_data=None):
+    os.makedirs(output_dir, exist_ok=True)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if train_data is None:
+        train_data = os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv')
+    if control_data is None:
+        control_data = os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv')
+    if drug_data is None:
+        drug_data = os.path.join(script_dir, '..', 'data', 'drugs.csv')
+
+    # === Load Data ===
+    print("\nLoading datasets...")
+    df_train = pd.read_csv(train_data)
+    df_control = pd.read_csv(control_data)
+    df_drugs = pd.read_csv(drug_data)
+
+    df_train.columns = df_train.columns.str.strip()
+
+    #Substructure smiles for feature capture of mutation protein
+    ligand_smiles = df_train['smiles']
+    full_smiles = df_train['smiles_full_egfr']
+    mutation_smiles = df_train['smiles 718_862_atp_pocket']
+    mut_hinge_p_loop = df_train['smiles_p_loop']
+    mut_helix = df_train['smiles_c_helix']
+    mut_dfg_a_loop = df_train['smiles_l858r_a_loop_dfg_motif']
+    mut_hrd_cat = df_train['smiles_catalytic_hrd_motif']
+
+    mutant = df_train['tkd']
+
+    activity_values = df_train['standard value'] #y_train1
+    docking_values = df_train['dock'] #y_train2
+
+    control_smiles = df_control['smiles_control']
+    control_name = df_control['id']
+    drug_smiles = df_drugs['smiles']
+
+    print(f"Training samples: {len(ligand_smiles)}")
+    print(f"Control samples: {len(control_smiles)}")
+    print(f"Drug samples: {len(drug_smiles)}")
+
+    # Data Validation
+    print("\n" + "="*80)
+    print("DATA VALIDATION")
+    print("="*80)
+
+    mutation_site_columns = {
+        'Full_SMILES': full_smiles,
+        'ATP_POCKET': mutation_smiles,
+        'P_LOOP_HINGE': mut_hinge_p_loop,
+        'C_HELIX': mut_helix,
+        'DFG_A_LOOP': mut_dfg_a_loop,
+        'HRD_CAT': mut_hrd_cat
+    }
+
+    for site_name, site_series in mutation_site_columns.items():
+        missing_count = site_series.isna().sum()
+        print(f"  {site_name:15s}: {missing_count:4d} missing SMILES ({missing_count/len(site_series)*100:.2f}%)")
+
+    # Filter to valid samples
+    valid_mask = ~(
+        ligand_smiles.isna() |
+        full_smiles.isna() |
+        mutation_smiles.isna() |
+        mut_hinge_p_loop.isna() |
+        mut_helix.isna() |
+        mut_dfg_a_loop.isna() |
+        mut_hrd_cat.isna() |
+        activity_values.isna() |
+        docking_values.isna()
+    )
+
+    valid_sample_count = valid_mask.sum()
+    print(f"\n✓ Valid samples: {valid_sample_count}/{len(df_train)} ({valid_sample_count/len(df_train)*100:.2f}%)")
+
+    if valid_sample_count == 0:
+        print("\n✗ ERROR: No complete samples found!")
+        sys.exit(1)
+
+    df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
+
+    ligand_smiles_valid = df_train_valid['smiles']
+    full_smiles_valid = df_train_valid['smiles_full_egfr']
+    mutation_smiles_valid = df_train_valid['smiles 718_862_atp_pocket']
+    mut_hinge_p_loop_valid = df_train_valid['smiles_p_loop']
+    mut_helix_valid = df_train_valid['smiles_c_helix']
+    mut_dfg_a_loop_valid = df_train_valid['smiles_l858r_a_loop_dfg_motif']
+    mut_hrd_cat_valid = df_train_valid['smiles_catalytic_hrd_motif']
+    mutant_valid = df_train_valid['tkd']
+
+    activity_values_valid = df_train_valid['standard value']
+    activity_values2_valid = df_train_valid['dock'].values
+
+    # Create unique mutation profiles
+    mutation_profile_columns = [
+        'smiles_full_egfr',
+        'smiles 718_862_atp_pocket',
+        'smiles_p_loop',
+        'smiles_c_helix',
+        'smiles_l858r_a_loop_dfg_motif',
+        'smiles_catalytic_hrd_motif',
+        'tkd'
+    ]
+
+    unique_mutation_profiles = df_train_valid[mutation_profile_columns].drop_duplicates(subset=['tkd']).reset_index(drop=True)
+    print(f"Unique mutation profiles: {len(unique_mutation_profiles)}")
+
     print("\n" + "="*80)
     print("STAGE 1: GENERATE FEATURES FOR ALL MUTATION SITES")
     print("="*80)
@@ -1267,7 +1276,7 @@ def main():
         feature_dims = {k: v.shape[1] for k, v in scaled_features.items()}
         model = build_priority_hierarchical_model(feature_dims)
 
-        checkpoint = ModelCheckpoint(f'hierarchical_model_{site_name}.h5', monitor='val_loss', save_best_only=True, verbose=0)
+        checkpoint = ModelCheckpoint(os.path.join(output_dir, f'hierarchical_model_{site_name}.h5'), monitor='val_loss', save_best_only=True, verbose=0)
         early_stop = EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=0)
         
         model.fit(
@@ -1290,7 +1299,7 @@ def main():
     sequential_embeddings = np.stack(all_embeddings, axis=1)
     rnn_model = build_rnn_sequential_model(sequential_embeddings.shape[2], sequential_embeddings.shape[1])
 
-    rnn_checkpoint = ModelCheckpoint('rnn_sequential_model.h5', monitor='val_loss', save_best_only=True, verbose=0)
+    rnn_checkpoint = ModelCheckpoint(os.path.join(output_dir, 'rnn_sequential_model.h5'), monitor='val_loss', save_best_only=True, verbose=0)
     rnn_early_stop = EarlyStopping(monitor='val_loss', patience=40, restore_best_weights=True, verbose=0)
     
     rnn_history = rnn_model.fit(
@@ -1302,9 +1311,9 @@ def main():
     
 
     # ===== SAVE SCALERS =====
-    with open('feature_scalers.pkl', 'wb') as f: pickle.dump(all_scalers, f)
-    with open('y_scalers.pkl', 'wb') as f: pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
-    unique_mutation_profiles.to_csv('mutation_profiles.csv', index=False)
+    with open(os.path.join(output_dir, 'feature_scalers.pkl'), 'wb') as f: pickle.dump(all_scalers, f)
+    with open(os.path.join(output_dir, 'y_scalers.pkl'), 'wb') as f: pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
+    unique_mutation_profiles.to_csv(os.path.join(output_dir, 'mutation_profiles.csv'), index=False)
 
     # ===== STAGE 4: PREDICTIONS =====
     print("\n" + "="*80)
@@ -1383,7 +1392,7 @@ def main():
             for key in control_features.keys():
                 scaled_control[key] = scalers[key].transform(np.array(control_features[key]))
             
-            h_model = load_model(f'hierarchical_model_{site_name}.h5', custom_objects={'KANLayer': KANLayer, 'FourierKANLayer': FourierKANLayer}, compile=False)
+            h_model = load_model(os.path.join(output_dir, f'hierarchical_model_{site_name}.h5'), custom_objects={'KANLayer': KANLayer, 'FourierKANLayer': FourierKANLayer}, compile=False)
             emb_model = Model(inputs=h_model.inputs, outputs=h_model.get_layer('embedding_output').output)
             site_embeddings = emb_model.predict([scaled_control[k] for k in ['final_fp_interaction', 'lig_mut_mix_inter_intra', 'inter_interaction', 
                                                                             'intra_interaction', 'mut_inter', 'lig_inter', 'mut_intra', 'lig_intra']], verbose=0)
@@ -1458,7 +1467,7 @@ def main():
             for key in drug_features.keys():
                 scaled_drug[key] = scalers[key].transform(np.array(drug_features[key]))
             
-            h_model = load_model(f'hierarchical_model_{site_name}.h5', custom_objects={'KANLayer': KANLayer, 'FourierKANLayer': FourierKANLayer}, compile=False)
+            h_model = load_model(os.path.join(output_dir, f'hierarchical_model_{site_name}.h5'), custom_objects={'KANLayer': KANLayer, 'FourierKANLayer': FourierKANLayer}, compile=False)
             emb_model = Model(inputs=h_model.inputs, outputs=h_model.get_layer('embedding_output').output)
             site_embeddings = emb_model.predict([scaled_drug[k] for k in ['final_fp_interaction', 'lig_mut_mix_inter_intra', 'inter_interaction', 
                                                                           'intra_interaction', 'mut_inter', 'lig_inter', 'mut_intra', 'lig_intra']], verbose=0)
@@ -1482,8 +1491,8 @@ def main():
     # Save results
     df_control_results = pd.DataFrame(all_control_results)
     df_drug_results = pd.DataFrame(all_drug_results)
-    df_control_results.to_csv('control_predictions_rnn.csv', index=False)
-    df_drug_results.to_csv('drug_predictions_rnn.csv', index=False)
+    df_control_results.to_csv(os.path.join(output_dir, 'control_predictions_rnn.csv'), index=False)
+    df_drug_results.to_csv(os.path.join(output_dir, 'drug_predictions_rnn.csv'), index=False)
     
     print(f"\n✓ Control Results: {len(df_control_results)} predictions saved")
     print(f"✓ Drug Results: {len(df_drug_results)} predictions saved")
@@ -1514,7 +1523,7 @@ def main():
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('kan_training_history.png', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'kan_training_history.png'), dpi=300, bbox_inches='tight')
     plt.show()
 
     print("✓ Training history plot saved: kan_training_history.png")
@@ -1525,7 +1534,15 @@ def main():
     print(f"  Cache directory:   {os.path.abspath(_CACHE_DIR)}")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='KAN Navier-Stokes Sinusoidal Hierarchical Model')
+    parser.add_argument('--output_dir', type=str, default='.', help='Directory to save all outputs')
+    parser.add_argument('--train_data', type=str, default=None, help='Training CSV path')
+    parser.add_argument('--control_data', type=str, default=None, help='Control compounds CSV path')
+    parser.add_argument('--drug_data', type=str, default=None, help='Drug compounds CSV path')
+    args = parser.parse_args()
+    main(output_dir=args.output_dir, train_data=args.train_data,
+         control_data=args.control_data, drug_data=args.drug_data)
 
 #TODO
 # 1. Find the most suiiable KAN layer 

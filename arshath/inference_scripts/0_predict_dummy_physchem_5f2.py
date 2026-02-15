@@ -821,10 +821,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Make predictions using trained dummy_physchem_5f2 model')
     parser.add_argument('--input', type=str, required=True, help='Input CSV file with SMILES and mutation data')
     parser.add_argument('--model_dir', type=str, default='.', help='Directory containing model files')
-    parser.add_argument('--output_dir', type=str, default='.', help='Directory to save outputs')
+    parser.add_argument('--output_dir', type=str, default=None, help='Output directory (default: {model_dir}/predictions/)')
     
     args = parser.parse_args()
-    
+
+    if args.output_dir is None:
+        args.output_dir = os.path.join(args.model_dir, 'predictions')
+
     results = make_predictions(args.input, args.model_dir, args.output_dir)
     
     if results is not None:

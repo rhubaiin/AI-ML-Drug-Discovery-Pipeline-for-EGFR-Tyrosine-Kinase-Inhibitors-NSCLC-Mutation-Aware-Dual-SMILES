@@ -322,62 +322,6 @@ print("Strategy 3: Dynamic Cross-Attention Between Ligand and Each Mutation Site
 print("="*80)
 
 # ============================================================================
-# DATA LOADING
-# ============================================================================
-print("\nLoading datasets...")
-# Using absolute paths as per original script
-df_train = pd.read_csv(os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv'))
-df_control = pd.read_csv(os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv'))
-df_drugs = pd.read_csv(os.path.join(script_dir, '..', 'data', 'drugs.csv'))
-
-df_train.columns = df_train.columns.str.strip()
-
-ligand_smiles = df_train['smiles']
-full_smiles = df_train['smiles_full_egfr']
-mutation_smiles = df_train['smiles 718_862_atp_pocket']
-mut_hinge_p_loop = df_train['smiles_p_loop']
-mut_helix = df_train['smiles_c_helix']
-mut_dfg_a_loop = df_train['smiles_l858r_a_loop_dfg_motif']
-mut_hrd_cat = df_train['smiles_catalytic_hrd_motif']
-mutant = df_train['tkd']
-activity_values = df_train['standard value']
-docking_values = df_train['dock']
-
-control_smiles = df_control['smiles_control']
-control_name = df_control['id']
-drug_smiles = df_drugs['smiles']
-
-print(f"Training samples: {len(ligand_smiles)}")
-
-valid_mask = ~(
-    ligand_smiles.isna() | full_smiles.isna() | mutation_smiles.isna() | 
-    mut_hinge_p_loop.isna() | mut_helix.isna() | mut_dfg_a_loop.isna() | 
-    mut_hrd_cat.isna() | activity_values.isna() | docking_values.isna() 
-)
-valid_sample_count = valid_mask.sum()
-print(f"\n✓ Valid samples: {valid_sample_count}/{len(df_train)}")
-if valid_sample_count == 0:
-    sys.exit(1)
-
-df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
-ligand_smiles_valid = df_train_valid['smiles']
-full_smiles_valid = df_train_valid['smiles_full_egfr']
-mutation_smiles_valid = df_train_valid['smiles 718_862_atp_pocket']
-mut_hinge_p_loop_valid = df_train_valid['smiles_p_loop']
-mut_helix_valid = df_train_valid['smiles_c_helix']
-mut_dfg_a_loop_valid = df_train_valid['smiles_l858r_a_loop_dfg_motif']
-mut_hrd_cat_valid = df_train_valid['smiles_catalytic_hrd_motif']
-mutant_valid = df_train_valid['tkd']
-activity_values_valid = df_train_valid['standard value']
-activity_values2_valid = df_train_valid['dock'].values
-
-mutation_profile_columns = [
-    'smiles_full_egfr', 'smiles 718_862_atp_pocket', 'smiles_p_loop', 
-    'smiles_c_helix', 'smiles_l858r_a_loop_dfg_motif', 'smiles_catalytic_hrd_motif', 'tkd'
-]
-unique_mutation_profiles = df_train_valid[mutation_profile_columns].drop_duplicates(subset=['tkd']).reset_index(drop=True)
-
-# ============================================================================
 # HELPER FUNCTIONS (Metrics & Features)
 # ============================================================================
 
@@ -813,7 +757,71 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
     )
     return model
 
-def keras_main():
+def main(output_dir='.', train_data=None, control_data=None, drug_data=None):
+    os.makedirs(output_dir, exist_ok=True)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if train_data is None:
+        train_data = os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv')
+    if control_data is None:
+        control_data = os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv')
+    if drug_data is None:
+        drug_data = os.path.join(script_dir, '..', 'data', 'drugs.csv')
+
+    # ========================================================================
+    # DATA LOADING
+    # ========================================================================
+    print("\nLoading datasets...")
+    df_train = pd.read_csv(train_data)
+    df_control = pd.read_csv(control_data)
+    df_drugs = pd.read_csv(drug_data)
+
+    df_train.columns = df_train.columns.str.strip()
+
+    ligand_smiles = df_train['smiles']
+    full_smiles = df_train['smiles_full_egfr']
+    mutation_smiles = df_train['smiles 718_862_atp_pocket']
+    mut_hinge_p_loop = df_train['smiles_p_loop']
+    mut_helix = df_train['smiles_c_helix']
+    mut_dfg_a_loop = df_train['smiles_l858r_a_loop_dfg_motif']
+    mut_hrd_cat = df_train['smiles_catalytic_hrd_motif']
+    mutant = df_train['tkd']
+    activity_values = df_train['standard value']
+    docking_values = df_train['dock']
+
+    control_smiles = df_control['smiles_control']
+    control_name = df_control['id']
+    drug_smiles = df_drugs['smiles']
+
+    print(f"Training samples: {len(ligand_smiles)}")
+
+    valid_mask = ~(
+        ligand_smiles.isna() | full_smiles.isna() | mutation_smiles.isna() |
+        mut_hinge_p_loop.isna() | mut_helix.isna() | mut_dfg_a_loop.isna() |
+        mut_hrd_cat.isna() | activity_values.isna() | docking_values.isna()
+    )
+    valid_sample_count = valid_mask.sum()
+    print(f"\n Valid samples: {valid_sample_count}/{len(df_train)}")
+    if valid_sample_count == 0:
+        sys.exit(1)
+
+    df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
+    ligand_smiles_valid = df_train_valid['smiles']
+    full_smiles_valid = df_train_valid['smiles_full_egfr']
+    mutation_smiles_valid = df_train_valid['smiles 718_862_atp_pocket']
+    mut_hinge_p_loop_valid = df_train_valid['smiles_p_loop']
+    mut_helix_valid = df_train_valid['smiles_c_helix']
+    mut_dfg_a_loop_valid = df_train_valid['smiles_l858r_a_loop_dfg_motif']
+    mut_hrd_cat_valid = df_train_valid['smiles_catalytic_hrd_motif']
+    mutant_valid = df_train_valid['tkd']
+    activity_values_valid = df_train_valid['standard value']
+    activity_values2_valid = df_train_valid['dock'].values
+
+    mutation_profile_columns = [
+        'smiles_full_egfr', 'smiles 718_862_atp_pocket', 'smiles_p_loop',
+        'smiles_c_helix', 'smiles_l858r_a_loop_dfg_motif', 'smiles_catalytic_hrd_motif', 'tkd'
+    ]
+    unique_mutation_profiles = df_train_valid[mutation_profile_columns].drop_duplicates(subset=['tkd']).reset_index(drop=True)
+
     device = get_device()
     print('\nLoading ChemBERTa model for embedding extraction...')
     tokenizer, chem_model, device = load_chemberta(device=device)
@@ -922,7 +930,7 @@ def keras_main():
 
         model = build_priority_hierarchical_model(feature_dims)
         
-        checkpoint = ModelCheckpoint(f'hierarchical_model_{site_name}.h5', monitor='val_loss', save_best_only=True, verbose=1)
+        checkpoint = ModelCheckpoint(os.path.join(output_dir, f'hierarchical_model_{site_name}.h5'), monitor='val_loss', save_best_only=True, verbose=1)
         early_stop = EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1)
 
         print(f"\nTraining {site_name} model...")
@@ -971,7 +979,7 @@ def keras_main():
     sequential_embeddings = np.stack(all_embeddings, axis=1)
     rnn_model = build_rnn_sequential_model(sequential_embeddings.shape[2], sequential_embeddings.shape[1])
     
-    rnn_checkpoint = ModelCheckpoint('rnn_sequential_model.h5', monitor='val_loss', save_best_only=True, verbose=1)
+    rnn_checkpoint = ModelCheckpoint(os.path.join(output_dir, 'rnn_sequential_model.h5'), monitor='val_loss', save_best_only=True, verbose=1)
     rnn_early_stop = EarlyStopping(monitor='val_loss', patience=40, restore_best_weights=True, verbose=1)
 
     print('\nTraining RNN-LSTM model...')
@@ -985,14 +993,14 @@ def keras_main():
         verbose=1,
     )
 
-    with open('feature_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'feature_scalers.pkl'), 'wb') as f:
         pickle.dump(all_scalers, f)
-    with open('y_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'y_scalers.pkl'), 'wb') as f:
         pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
-    with open('chembert_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'chembert_scalers.pkl'), 'wb') as f:
         pickle.dump([chem_emb_scaler], f) # Save the single scaler used for all
 
-    unique_mutation_profiles.to_csv('mutation_profiles.csv', index=False)
+    unique_mutation_profiles.to_csv(os.path.join(output_dir, 'mutation_profiles.csv'), index=False)
     
     # Prediction loop for Control/Drug
     all_control_results = []
@@ -1057,7 +1065,7 @@ def keras_main():
             control_lig_emb = chem_emb_scaler.transform(control_lig_emb)
             mut_emb_site = chem_emb_scaler.transform(mut_emb_site)
 
-            hierarchical_model = load_model(f'hierarchical_model_{site_name}.h5', compile=False)
+            hierarchical_model = load_model(os.path.join(output_dir, f'hierarchical_model_{site_name}.h5'), compile=False)
             # Recompile isn't strictly needed for predict but good practice
             embedding_model = Model(inputs=hierarchical_model.inputs, outputs=hierarchical_model.get_layer('embedding_output').output)
             
@@ -1151,9 +1159,9 @@ def keras_main():
             drug_lig_emb = chem_emb_scaler.transform(drug_lig_emb)
             mut_emb_site = chem_emb_scaler.transform(mut_emb_site)
 
-            hierarchical_model = load_model(f'hierarchical_model_{site_name}.h5', compile=False)
+            hierarchical_model = load_model(os.path.join(output_dir, f'hierarchical_model_{site_name}.h5'), compile=False)
             embedding_model = Model(inputs=hierarchical_model.inputs, outputs=hierarchical_model.get_layer('embedding_output').output)
-            
+
             site_embeddings = embedding_model.predict([
                 drug_lig_emb,
                 mut_emb_site,
@@ -1182,8 +1190,8 @@ def keras_main():
     # df_drug_results.to_csv('drug_predictions_rnn_chembert.csv', index=False) <-- REMOVED early save
     
     # Save results (Consolidated)
-    df_control_results.to_csv('control_predictions_rnn_chembert.csv', index=False)
-    df_drug_results.to_csv('drug_predictions_rnn_chembert.csv', index=False)
+    df_control_results.to_csv(os.path.join(output_dir, 'control_predictions_rnn_chembert.csv'), index=False)
+    df_drug_results.to_csv(os.path.join(output_dir, 'drug_predictions_rnn_chembert.csv'), index=False)
     print('Execution complete. Outputs saved.')
 
     # --- Training history plotting (Added per request) ---
@@ -1227,7 +1235,7 @@ def keras_main():
         plt.legend()
 
         plt.tight_layout()
-        out_png = 'training_history_keras_crossattn.png'
+        out_png = os.path.join(output_dir, 'training_history_keras_crossattn.png')
         plt.savefig(out_png, dpi=200)
         print(f'Saved training history plot to {out_png}')
     except Exception as e:
@@ -1239,4 +1247,12 @@ def keras_main():
     print(f"  Cache directory:   {os.path.abspath(_CACHE_DIR)}")
 
 if __name__ == '__main__':
-    keras_main()
+    import argparse
+    parser = argparse.ArgumentParser(description='ChemBERTa Cross-Attention Hierarchical Model')
+    parser.add_argument('--output_dir', type=str, default='.', help='Directory to save all outputs')
+    parser.add_argument('--train_data', type=str, default=None, help='Training CSV path')
+    parser.add_argument('--control_data', type=str, default=None, help='Control compounds CSV path')
+    parser.add_argument('--drug_data', type=str, default=None, help='Drug compounds CSV path')
+    args = parser.parse_args()
+    main(output_dir=args.output_dir, train_data=args.train_data,
+         control_data=args.control_data, drug_data=args.drug_data)

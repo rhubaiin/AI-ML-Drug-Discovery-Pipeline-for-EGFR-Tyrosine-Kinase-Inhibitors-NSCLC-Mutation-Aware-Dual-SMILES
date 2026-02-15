@@ -1645,10 +1645,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Predictions for KAN Fourier model')
     parser.add_argument('--input', type=str, required=True, help='Input CSV file')
     parser.add_argument('--model_dir', type=str, default='.', help='Model directory')
-    parser.add_argument('--output_dir', type=str, default='.', help='Output directory')
+    parser.add_argument('--output_dir', type=str, default=None, help='Output directory (default: {model_dir}/predictions/)')
     
     args = parser.parse_args()
-    
+
+    if args.output_dir is None:
+        args.output_dir = os.path.join(args.model_dir, 'predictions')
+
     results = make_predictions(args.input, args.model_dir, args.output_dir)
     
     print(f"\n✓ Complete! Total predictions: {len(results)}")

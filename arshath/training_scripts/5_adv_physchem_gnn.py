@@ -959,18 +959,26 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
 # Main Workflow
 # =============================================================================
 
-def keras_main():
+def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=None):
     """Full training workflow with predictions on control and drug datasets."""
+    os.makedirs(output_dir, exist_ok=True)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if train_data is None:
+        train_data = os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv')
+    if control_data is None:
+        control_data = os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv')
+    if drug_data is None:
+        drug_data = os.path.join(script_dir, '..', 'data', 'drugs.csv')
+
     print("\n" + "="*80)
     print("FULL TRAINING MODE")
     print("="*80)
-    
+
     # Load datasets
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     print("\nLoading datasets...")
-    df_train = pd.read_csv(os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv'))
-    df_control = pd.read_csv(os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv'))
-    df_drugs = pd.read_csv(os.path.join(script_dir, '..', 'data', 'drugs.csv'))
+    df_train = pd.read_csv(train_data)
+    df_control = pd.read_csv(control_data)
+    df_drugs = pd.read_csv(drug_data)
     
     df_train.columns = df_train.columns.str.strip()
     
@@ -1124,7 +1132,7 @@ def keras_main():
         model = build_priority_hierarchical_model(feature_dims)
         
         # Training callbacks
-        checkpoint = ModelCheckpoint(f'gnn_hierarchical_{site_name}.h5', 
+        checkpoint = ModelCheckpoint(os.path.join(output_dir, f'gnn_hierarchical_{site_name}.h5'),
                                      monitor='val_loss', save_best_only=True, verbose=1)
         early_stop = EarlyStopping(monitor='val_loss', patience=30, 
                                    restore_best_weights=True, verbose=1)
@@ -1161,7 +1169,7 @@ def keras_main():
     
     rnn_model = build_rnn_sequential_model(embedding_dim=16, n_timesteps=6)
     
-    rnn_checkpoint = ModelCheckpoint('gnn_rnn_model.h5', monitor='val_loss', 
+    rnn_checkpoint = ModelCheckpoint(os.path.join(output_dir, 'gnn_rnn_model.h5'), monitor='val_loss',
                                      save_best_only=True, verbose=1)
     rnn_early_stop = EarlyStopping(monitor='val_loss', patience=40, 
                                    restore_best_weights=True, verbose=1)
@@ -1179,11 +1187,11 @@ def keras_main():
     print("OK RNN training complete")
     
     # Save scalers
-    with open('gnn_feature_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'gnn_feature_scalers.pkl'), 'wb') as f:
         pickle.dump(all_scalers, f)
-    with open('gnn_y_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'gnn_y_scalers.pkl'), 'wb') as f:
         pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
-    with open('gnn_embedding_scalers.pkl', 'wb') as f:
+    with open(os.path.join(output_dir, 'gnn_embedding_scalers.pkl'), 'wb') as f:
         pickle.dump(all_gnn_scalers, f)
     
     # Save training plot
@@ -1218,7 +1226,7 @@ def keras_main():
         plt.legend()
 
         plt.tight_layout()
-        out_png = 'gnn_training_history.png'
+        out_png = os.path.join(output_dir, 'gnn_training_history.png')
         plt.savefig(out_png, dpi=200)
         print(f'Saved training history plot to {out_png}')
     except Exception as e:
@@ -1227,7 +1235,7 @@ def keras_main():
     # Predictions on control and drugs
     predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                         all_gnn_scalers, y_scaler1, y_scaler2, rnn_model,
-                        mutation_sites, df_train_valid)
+                        mutation_sites, df_train_valid, output_dir=output_dir)
 
     print(f"\n--- Feature Cache Stats ---")
     print(f"  Disk cache hits:   {_cache_hits}")
@@ -1237,7 +1245,7 @@ def keras_main():
 
 def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                         all_gnn_scalers, y_scaler1, y_scaler2, rnn_model,
-                        mutation_sites, df_train_valid):
+                        mutation_sites, df_train_valid, output_dir='.'):
     """Generate predictions on control and drug datasets."""
     
     # Get unique mutation profiles
@@ -1319,7 +1327,7 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                 gnn_concat = np.concatenate([comp_gnn, mut_gnn], axis=1)
                 gnn_scaled = all_gnn_scalers[site_idx].transform(gnn_concat)
                 
-                hier_model = load_model(f'gnn_hierarchical_{site_name}.h5', compile=False)
+                hier_model = load_model(os.path.join(output_dir, f'gnn_hierarchical_{site_name}.h5'), compile=False)
                 emb_model = Model(inputs=hier_model.inputs, 
                                   outputs=hier_model.get_layer('embedding_output').output)
                 
@@ -1348,7 +1356,7 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                     'predicted_docking': float(docking[i][0])
                 })
         
-        output_file = f'gnn_{dataset_name.lower()}_predictions.csv'
+        output_file = os.path.join(output_dir, f'gnn_{dataset_name.lower()}_predictions.csv')
         pd.DataFrame(results).to_csv(output_file, index=False)
         print(f"OK Saved {output_file} ({len(results)} rows)")
     
@@ -1362,13 +1370,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MolCLR-GNN Hierarchical Model')
     parser.add_argument('--test', action='store_true', help='Run test mode')
     parser.add_argument('--n_samples', type=int, default=5, help='Test samples')
+    parser.add_argument('--output_dir', type=str, default='.', help='Directory to save all outputs')
+    parser.add_argument('--train_data', type=str, default=None, help='Training CSV path')
+    parser.add_argument('--control_data', type=str, default=None, help='Control compounds CSV path')
+    parser.add_argument('--drug_data', type=str, default=None, help='Drug compounds CSV path')
     args = parser.parse_args()
-    
+
     if args.test:
         success = test_mode(n_samples=args.n_samples)
         sys.exit(0 if success else 1)
     else:
-        keras_main()
+        keras_main(output_dir=args.output_dir, train_data=args.train_data,
+                   control_data=args.control_data, drug_data=args.drug_data)
 
 #TODO
 # 1. Conduct fine tuning using generated embedddings from of ligand and mutants in df_train dataset 

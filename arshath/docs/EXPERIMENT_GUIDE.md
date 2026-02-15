@@ -13,6 +13,7 @@ This is a **drug discovery ML pipeline** for predicting 4th-generation EGFR inhi
 
 ```
 arshath/
+├── run_experiment.py           # Experiment orchestrator
 ├── data/                       # All datasets
 │   ├── manual_egfr3_mini_dock_fixed.csv   # Large training set (2,677 rows)
 │   ├── df_3_shuffled.csv                  # Smaller training set (751 rows)
@@ -33,6 +34,13 @@ arshath/
 │   ├── 0_predict_dummy_physchem_5f2.py
 │   ├── 1_predict_adv_physchem5f2.py
 │   └── 3_predict_adv_physchem_KAN_navier_stokes.py
+│
+├── experiments/                # Auto-organized experiment outputs
+│   ├── model_0_dummy_physchem/
+│   │   └── <dataset_name>/     # e.g. manual_egfr3_mini_dock_fixed/
+│   ├── model_1_adv_physchem5f2/
+│   │   └── <dataset_name>/
+│   └── ...
 │
 └── docs/                       # Documentation
     ├── EXPERIMENT_GUIDE.md     # This file
@@ -103,33 +111,69 @@ The core idea is **cross-validation between the two datasets**:
 - **Run A**: Train on `manual_egfr3_mini_dock_fixed.csv` → predict on `df_3_shuffled.csv` / test sets
 - **Run B**: Train on `df_3_shuffled.csv` → predict on `manual_egfr3_mini_dock_fixed.csv` / test sets
 
-To swap, change the CSV filename in the training script's `pd.read_csv(...)` line.
+To swap datasets, use the `--train_data` flag:
+```bash
+python run_experiment.py --model 1 --train_data data/manual_egfr3_mini_dock_fixed.csv
+```
+
+Each dataset run gets its own output directory, so results from different datasets never overwrite each other.
 
 ---
 
 ## Recommended Execution Order
 
-1. **Start simple** — run model `0` first as a baseline
-2. **Then** run model `1` (advanced feed-forward)
-3. **Then** try the more complex variants (`2`–`5`)
-4. For each trained model, run the matching inference script
-5. **Swap the training dataset** (change the CSV path in the training script) and repeat
+### Option A: Use the orchestrator (recommended)
+
+The `run_experiment.py` orchestrator automates training and inference, organizing all outputs into `experiments/<model_name>/<dataset_name>/`.
+
+```bash
+# Run from arshath/ directory
+
+# --- Model 0: Train + Inference ---
+python run_experiment.py --model 0 --predict_input data/test_egfr3.csv
+
+# --- Models 0, 1, 3: Train + Inference ---
+python run_experiment.py --model 0 1 3 --predict_input data/test_egfr3.csv
+
+# --- All 6 models: Train only ---
+python run_experiment.py --model all
+
+# --- Swap dataset: Train model 1 with the larger dataset ---
+python run_experiment.py --model 1 --train_data data/manual_egfr3_mini_dock_fixed.csv
+```
+
+Outputs land in structured directories:
+```
+experiments/model_0_dummy_physchem/manual_egfr3_mini_dock_fixed/
+experiments/model_1_adv_physchem5f2/df_3_shuffled/
+experiments/model_1_adv_physchem5f2/manual_egfr3_mini_dock_fixed/  # different dataset run
+```
+
+### Option B: Run scripts directly with CLI args
+
+All training scripts now accept `--output_dir`, `--train_data`, `--control_data`, and `--drug_data`:
 
 ```bash
 # Run from arshath/ directory
 
 # --- Model 0: Baseline ---
-python training_scripts/0_dummy_physchem_5f2.py
-python inference_scripts/0_predict_dummy_physchem_5f2.py --input data/test_egfr3.csv
+python training_scripts/0_dummy_physchem_5f2.py --output_dir /tmp/model0
+python inference_scripts/0_predict_dummy_physchem_5f2.py --input data/test_egfr3.csv --model_dir /tmp/model0
 
 # --- Model 1: Advanced Feed-Forward ---
-python training_scripts/1_adv_physchem5f2.py
-python inference_scripts/1_predict_adv_physchem5f2.py --input data/test_egfr3.csv
+python training_scripts/1_adv_physchem5f2.py --output_dir /tmp/model1
+python inference_scripts/1_predict_adv_physchem5f2.py --input data/test_egfr3.csv --model_dir /tmp/model1
 
 # --- Model 3: KAN Fourier ---
-python training_scripts/3_adv_physchem_KAN_navier_stokes_sinusoid.py
-python inference_scripts/3_predict_adv_physchem_KAN_navier_stokes.py --input data/test_egfr3.csv
+python training_scripts/3_adv_physchem_KAN_navier_stokes_sinusoid.py --output_dir /tmp/model3
+python inference_scripts/3_predict_adv_physchem_KAN_navier_stokes.py --input data/test_egfr3.csv --model_dir /tmp/model3
 ```
+
+When `--output_dir` is omitted from inference scripts, predictions default to `{model_dir}/predictions/`.
+
+### Option C: Run with defaults (legacy behavior)
+
+Scripts still work without any arguments -- they use the same defaults as before (CWD for output, hardcoded data paths).
 
 ---
 
@@ -186,7 +230,69 @@ The pipeline targets these EGFR mutations:
 
 ## Output Files
 
-After training and prediction, each model produces:
-- `control_predictions.csv` — predictions for known EGFR TKI drugs
-- `drug_predictions.csv` — predictions for candidate molecules
-- Model weights (`.h5`), scalers (`.pkl`), encoder (`.pkl`)
+All outputs are organized under `experiments/<model_name>/<dataset_name>/`:
+
+```
+experiments/model_1_adv_physchem5f2/df_3_shuffled/
+├── hierarchical_model_full.h5          # Per-site models
+├── hierarchical_model_hinge_p_loop.h5
+├── hierarchical_model_c_helix.h5
+├── hierarchical_model_a_loop_dfg.h5
+├── hierarchical_model_hrd_cat.h5
+├── rnn_sequential_model.h5             # Combined RNN model
+├── feature_scalers.pkl                 # Input feature scalers
+├── y_scalers.pkl                       # Output target scalers
+├── mutation_profiles.csv               # Per-mutation activity profiles
+├── control_predictions_rnn.csv         # Predictions for known EGFR TKI drugs
+├── drug_predictions_rnn.csv            # Predictions for candidate molecules
+├── rnn_training_history.png            # Training loss/metric curves
+└── predictions/                        # Inference outputs (from inference scripts)
+    ├── predictions_adv_physchem5f2.csv
+    ├── metrics/
+    └── plots/
+```
+
+### Per-model output differences
+
+| Model | Weights | Extra scalers | Predictions |
+|-------|---------|---------------|-------------|
+| 0 — Dummy | `feedforward_model.h5` | `mutant_encoder.pkl`, `mutant_mapping.pkl` | `control_predictions.csv`, `drug_predictions.csv` |
+| 1 — Advanced | `hierarchical_model_{site}.h5` (×5), `rnn_sequential_model.h5` | — | `control_predictions_rnn.csv`, `drug_predictions_rnn.csv` |
+| 2 — KAN B-Spline | `hierarchical_model_{site}.h5` (×5), `rnn_sequential_model.h5` | — | `control_predictions_rnn.csv`, `drug_predictions_rnn.csv` |
+| 3 — KAN Fourier | `hierarchical_model_{site}.h5` (×5), `rnn_sequential_model.h5` | — | `control_predictions_rnn.csv`, `drug_predictions_rnn.csv` |
+| 4 — ChemBERTa | `hierarchical_model_{site}.h5` (×5), `rnn_sequential_model.h5` | `chembert_scalers.pkl` | `control_predictions_rnn.csv`, `drug_predictions_rnn.csv` |
+| 5 — GNN | `gnn_hierarchical_{site}.h5` (×5), `gnn_rnn_model.h5` | `gnn_embedding_scalers.pkl` | `gnn_{name}_predictions.csv` |
+
+All models produce `feature_scalers.pkl`, `y_scalers.pkl`, `mutation_profiles.csv`, and a training history plot.
+
+---
+
+## CLI Arguments Reference
+
+### Training scripts (all 6)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--output_dir` | `.` (CWD) | Directory for all saved outputs |
+| `--train_data` | Model-specific default CSV | Training data CSV path |
+| `--control_data` | `data/egfr_tki_valid_cleaned.csv` | Control compounds CSV |
+| `--drug_data` | `data/drugs.csv` | Drug compounds CSV |
+
+### Inference scripts (0, 1, 3)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--input` | *(required)* | Input CSV for predictions |
+| `--model_dir` | *(required)* | Directory containing trained model files |
+| `--output_dir` | `{model_dir}/predictions/` | Directory for prediction outputs |
+
+### Orchestrator (`run_experiment.py`)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | *(required)* | Model IDs (0-5) or `all` |
+| `--predict_input` | *(none)* | Input CSV for inference after training |
+| `--train_data` | Model-specific default | Override training CSV |
+| `--control_data` | *(none)* | Override control compounds CSV |
+| `--drug_data` | *(none)* | Override drug compounds CSV |
+| `--experiments_dir` | `experiments/` | Base output directory |
