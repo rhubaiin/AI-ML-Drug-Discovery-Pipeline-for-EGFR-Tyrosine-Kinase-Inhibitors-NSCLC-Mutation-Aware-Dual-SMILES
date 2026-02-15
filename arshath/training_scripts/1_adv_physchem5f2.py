@@ -48,9 +48,9 @@ print("="*80)
 # === Load Data ===
 print("\nLoading datasets...")
 script_dir = os.path.dirname(os.path.abspath(__file__))
-df_train = pd.read_csv(os.path.join(script_dir, 'df_3_shuffled.csv'))
-df_control = pd.read_csv(os.path.join(script_dir, 'egfr_tki_valid_cleaned.csv'))
-df_drugs = pd.read_csv(os.path.join(script_dir, 'drugs.csv'))
+df_train = pd.read_csv(os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv'))
+df_control = pd.read_csv(os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv'))
+df_drugs = pd.read_csv(os.path.join(script_dir, '..', 'data', 'drugs.csv'))
 
 df_train.columns = df_train.columns.str.strip()
 

@@ -47,14 +47,15 @@ logger.add(
 
 print("="*80)
 print("RNN-LSTM-KAN INTEGRATED HIERARCHICAL MODEL FOR ADVANCED PHYSICOCHEMICAL DESCRIPTOR GENERATION (6d2)")
-print("Sequential Training: ATP_POCKET â†’ P_LOOP â†’ C_HELIX â†’ DFG_A_LOOP â†’ HRD_CAT")
+print("Sequential Training: ATP_POCKET → P_LOOP → C_HELIX → DFG_A_LOOP → HRD_CAT")
 print("="*80)
 
 # === Load Data ===
 print("\nLoading datasets...")
-df_train = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/df_3_shuffled.csv')
-df_control = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/egfr_tki_valid_cleaned.csv')
-df_drugs = pd.read_csv('/mnt/d/Publications/project_insilico/activity_physicochem_descriptor/drugs.csv')
+script_dir = os.path.dirname(os.path.abspath(__file__))
+df_train = pd.read_csv(os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv'))
+df_control = pd.read_csv(os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv'))
+df_drugs = pd.read_csv(os.path.join(script_dir, '..', 'data', 'drugs.csv'))
 
 df_train.columns = df_train.columns.str.strip()
 
@@ -112,10 +113,10 @@ valid_mask = ~(
 )
 
 valid_sample_count = valid_mask.sum()
-print(f"\nâœ“ Valid samples: {valid_sample_count}/{len(df_train)} ({valid_sample_count/len(df_train)*100:.2f}%)")
+print(f"\n✓ Valid samples: {valid_sample_count}/{len(df_train)} ({valid_sample_count/len(df_train)*100:.2f}%)")
 
 if valid_sample_count == 0:
-    print("\nâœ— ERROR: No complete samples found!")
+    print("\n✗ ERROR: No complete samples found!")
     sys.exit(1)
 
 df_train_valid = df_train[valid_mask].copy().reset_index(drop=True)
@@ -155,54 +156,53 @@ def safe_divide(numerator, denominator, default=0.0):
         result = np.where(denominator != 0, numerator / denominator, default)
         return result
 
-# ============================================================================
-# B-SPLINE KAN LAYER (Ported from PyKAN spline.py)
-# ============================================================================
+
 
 #Assumptions:
-# 1. B-spline non-linear gradients has significant feature capture capability for advanced physicochemical descriptors
-# 2. KAN layers with B-spline non-linear gradients can better approximate complex non-linear relationships in molecular data
+# 1. KAN Gausian RBF basis functions can effectively capture non-linear relationships in Hierachical layers
+# 1. Navier-stokes fluid mechanics gradients has significant feature capture at RNN LTSM layers
+# 2. KAN layers with non-linear gradient basis can better approximate complex non-linear relationships in molecular data
 # 3. KAN layers are independent and can be integrated into existing hierachical and RNN LTSM layers 
-# 4. B-spline degree and grid size can be tuned for optimal feature extraction
+# 4. Navier Stokes equations allow sinusoidal periodic sequence basis approximate for EGFR mechanistic catalytic activity 
 
+
+# ============================================================================
+# KAN LAYER IMPLEMENTATION (Efficient-KAN style with Gaussian RBF)
+# ============================================================================
 
 # φ(x) = wᵦ · SiLU(x) + wₛ · spline(x)
 #        ↑              ↑
 #    base function   learnable B-spline
 
-#φ(x) = w_b·b(x) + w_s·spline(x), where b(x) = SiLU(x) , spline(x) = ∑ c_i B_i(x) 
-
-# B-Spline Basis Functions
-
-# For a given input x and knot vector t = [t₀, t₁, ..., tₘ]:
-# Degree 0 (piecewise constant):
-# Bᵢ,₀(x) = 1  if tᵢ ≤ x < tᵢ₊₁
-#           0  otherwise
-# Degree k (recursive formula - Cox-de Boor)
-# Bᵢ,ₖ(x) = [(x - tᵢ)/(tᵢ₊ₖ - tᵢ)] · Bᵢ,ₖ₋₁(x) 
-#         + [(tᵢ₊ₖ₊₁ - x)/(tᵢ₊ₖ₊₁ - tᵢ₊₁)] · Bᵢ₊₁,ₖ₋₁(x)
-
+# y = SiLU(x)·W_base + Σₖ₌₁ᴳ cₖ·ψₖ(x) , where Gaussian RBF ψₖ(x) = exp(-(x - μₖ)²/σ²)
 
 class KANLayer(tf.keras.layers.Layer):
-    """
-    B-spline based KANLayer.
-    Produces output: SiLU(x) @ W_b + B_spline(x) @ W_s
-    W_s shape: (in_dim, G + k, out_dim) (allocated according to grid_size and degree)
-    """
-    def __init__(self, out_features, grid_size=20, grid_range=[-1.0, 1.0], degree=3, **kwargs):
+
+    def __init__(self, out_features, grid_size=20, grid_range=[-2.0, 2.0], **kwargs):
         super(KANLayer, self).__init__(**kwargs)
         self.out_features = out_features
-        self.grid_size = int(grid_size)
-        self.grid_min, self.grid_max = float(grid_range[0]), float(grid_range[1])
-        self.k = int(degree)
-
+        self.grid_size = grid_size
+        self.grid_min, self.grid_max = grid_range
+        
     def build(self, input_shape):
-        in_features = int(input_shape[-1])
-
-        # Grid initialization (fixed grid points)
-        grid = tf.linspace(self.grid_min, self.grid_max, self.grid_size)
-        self.mu = tf.cast(grid, dtype=tf.float32)  # (G,)
-
+        in_features = input_shape[-1]
+        
+        # Grid initialization (Fixed grid points)
+        self.grid = tf.linspace(self.grid_min, self.grid_max, self.grid_size)
+        self.grid = tf.cast(self.grid, dtype=tf.float32) # (grid_size,)
+        
+        # Use a non-trainable weight for grid centers so it persists
+        self.mu = self.add_weight(
+            name='mu',
+            shape=(self.grid_size,),
+            initializer=tf.keras.initializers.Constant(self.grid.numpy()), # Use numpy value
+            trainable=False 
+        )
+        
+        # Sigma (bandwidth)
+        spacing = (self.grid_max - self.grid_min) / (self.grid_size - 1)
+        self.sigma = spacing
+        
         # Base Weights (Linear approximation part)
         self.base_weight = self.add_weight(
             name='base_weight',
@@ -210,115 +210,45 @@ class KANLayer(tf.keras.layers.Layer):
             initializer='glorot_uniform',
             trainable=True
         )
-
-        # Spline Weights (Coefficients for B-spline basis)
-        # coeff_count should match the number of basis functions produced by B_batch.
-        # For an open uniform knot vector with G grid points and degree k,
-        # number of basis functions = G + k - 1
-        coeff_count = max(1, self.grid_size + self.k - 1)
+        
+        # Spline Weights (Coefficients for RBFs)
         self.spline_weight = self.add_weight(
             name='spline_weight',
-            shape=(in_features, coeff_count, self.out_features),
+            shape=(in_features, self.grid_size, self.out_features),
             initializer='glorot_uniform',
             trainable=True
         )
-
+        
         super(KANLayer, self).build(input_shape)
-
-    def extend_grid(self, grid):
-        """Extend the knot grid by repeating boundary knots for open uniform knot vector."""
-        left = tf.repeat(grid[0:1], self.k)
-        right = tf.repeat(grid[-1:], self.k)
-        extended = tf.concat([left, grid, right], axis=0)
-        return extended
-
-    def B_batch(self, x, knots):
-        """
-        Compute B-spline basis for input x using Cox-de Boor recursion.
-        x: tensor shape (..., in_features)
-        knots: 1D tensor of knots (L,)
-        returns: basis tensor shape (..., in_features, n_basis)
-        where n_basis = L - k - 1
-        """
-        # Use Python-known grid and degree sizes so control flow uses Python ints
-        k = int(self.k)
-        G = int(self.grid_size)
-        # extended knots length L = G + 2*k (from extend_grid)
-        L = G + 2 * k
-        n_basis = L - k - 1
-
-        knots = tf.cast(knots, tf.float32)
-
-        # Flatten leading dims except feature dim for vectorized computation
-        orig_shape = tf.shape(x)
-        batch_flat = tf.reshape(x, (-1, orig_shape[-1]))  # (N, in)
-
-        # Degree 0 basis: evaluate intervals for i in 0..L-2
-        t_i = knots[:-1]  # (L-1,)
-        t_ip1 = knots[1:]
-
-        # Expand for broadcasting: (N, in, L-1)
-        x_exp = tf.expand_dims(batch_flat, -1)  # (N, in, 1)
-        t0 = tf.reshape(t_i, (1, 1, -1))
-        t1 = tf.reshape(t_ip1, (1, 1, -1))
-
-        N = tf.cast(tf.logical_and(x_exp >= t0, x_exp < t1), tf.float32)  # (N, in, L-1)
-
-        # handle equality at the rightmost knot: add equality mass into the last interval
-        right_eq = tf.equal(x_exp, tf.reshape(knots[-1], (1,1,1)))
-        right_eq_float = tf.cast(right_eq, tf.float32)
-        last_col = N[:, :, -1:]
-        last_col = last_col + right_eq_float
-        N = tf.concat([N[:, :, :-1], last_col], axis=2)
-
-        # Recursively build up to degree k using Python loop over d
-        for d in range(1, k+1):
-            nd = L - d - 1  # python int
-
-            t_i = knots[:nd]
-            t_id = knots[d: d+nd]
-            t_ip1 = knots[1:nd+1]
-            t_idp1 = knots[d+1: d+nd+1]
-
-            N_left = N[:, :, :nd]
-            N_right = N[:, :, 1:nd+1]
-
-            denom_left = t_id - t_i
-            denom_left = tf.where(denom_left == 0, tf.ones_like(denom_left), denom_left)
-            denom_left = tf.reshape(denom_left, (1, 1, -1))
-            num_left = x_exp - tf.reshape(t_i, (1,1,-1))
-            left = (num_left / denom_left) * N_left
-
-            denom_right = t_idp1 - t_ip1
-            denom_right = tf.where(denom_right == 0, tf.ones_like(denom_right), denom_right)
-            denom_right = tf.reshape(denom_right, (1, 1, -1))
-            num_right = tf.reshape(t_idp1, (1,1,-1)) - x_exp
-            right = (num_right / denom_right) * N_right
-
-            N = left + right
-
-        # Now N shape: (N, in, n_basis)
-        final = tf.reshape(N, tf.concat([orig_shape[:-1], [orig_shape[-1], tf.shape(N)[-1]]], axis=0))
-        # final shape: (..., in, n_basis)
-        return final
 
     def call(self, x):
         # x shape: (..., in_features)
+        
+        # 1. Base Feature Transformation (SiLU activation)
         base = tf.nn.silu(x)
+        # Use tensordot or einsum to handle broadcasting safely
+        # '...i, io -> ...o'
         base_out = tf.einsum('...i,io->...o', base, self.base_weight)
-
-        # Spline part
-        extended_knots = self.extend_grid(self.mu)
-        B = self.B_batch(x, extended_knots)  # (..., in, n_basis)
-
-        # Basis and spline coefficient shapes are constructed to match in build(),
-        # so no runtime branching is required here.
-
-        # Compute spline output: '... i g, i g o -> ... o' where i=in_features, g=n_basis
-        spline_out = tf.einsum('...ig,igo->...o', B, self.spline_weight)
-
+        
+        # 2. Spline Part (RBF Expansion)
+        # Expand x: (..., in) -> (..., in, 1)
+        x_expanded = tf.expand_dims(x, -1)
+        
+        # Compute distance to grid centers (mu)
+        # (..., in, 1) - (grid,) -> (..., in, grid)
+        diff = x_expanded - self.mu
+        
+        # RBF Basis functions (Gaussian)
+        # exp(-(x - mu)^2 / sigma^2)
+        basis = tf.exp(-tf.math.pow(diff / self.sigma, 2)) 
+        
+        # Compute spline output
+        # '...ig, igo -> ...o' 
+        spline_out = tf.einsum('...ig,igo->...o', basis, self.spline_weight)
+        
+        # Final output
         return base_out + spline_out
-
+        
     def compute_output_shape(self, input_shape):
         return input_shape[:-1] + (self.out_features,)
 
@@ -327,11 +257,118 @@ class KANLayer(tf.keras.layers.Layer):
         config.update({
             'out_features': self.out_features,
             'grid_size': self.grid_size,
-            'grid_range': [self.grid_min, self.grid_max],
-            'degree': self.k
+            'grid_range': [self.grid_min, self.grid_max]
         })
         return config
 
+# ============================================================================
+# FOURIER KAN LAYER (NAVIER STOKES SINUSOID BASIS)
+# ============================================================================
+
+# φ(x) = wᵦ · SiLU(x) + wₛ · spline(x)
+#        ↑              ↑
+#    base function   learnable B-spline
+
+# y = Σₖ₌₁ᴳ [aₖ·cos(kx) + bₖ·sin(kx)] + bias
+
+
+class FourierKANLayer(tf.keras.layers.Layer):
+
+    def __init__(
+        self,
+        out_features,
+        grid_size=5,
+        add_bias=True,
+        domain="[-pi, pi]",   
+        **kwargs
+    ):
+        super(FourierKANLayer, self).__init__(**kwargs)
+        self.out_features = out_features
+        self.grid_size = grid_size
+        self.add_bias = add_bias
+        self.domain = domain
+        
+    def build(self, input_shape):
+        in_features = input_shape[-1]
+        
+        limit = 1.0 / (np.sqrt(in_features) * np.sqrt(self.grid_size))
+        
+        self.fouriercoeffs = self.add_weight(
+            name="fouriercoeffs",
+            shape=(2, self.out_features, in_features, self.grid_size),
+            initializer=tf.keras.initializers.RandomNormal(stddev=limit),
+            trainable=True
+        )
+        
+        if self.add_bias:
+            self.bias = self.add_weight(
+                name="bias",
+                shape=(self.out_features,),
+                initializer="zeros",
+                trainable=True
+            )
+            
+        super().build(input_shape)
+
+    def call(self, x):
+
+        if self.domain == "[-pi, pi]":
+            # assume x ∈ [0,1] or arbitrary → scale
+            x = tf.clip_by_value(x, 0.0, 1.0)
+            x = (x * 2.0 - 1.0) * np.pi
+
+        elif self.domain == "[0, 2pi]":
+            x = tf.clip_by_value(x, 0.0, 1.0)
+            x = x * (2.0 * np.pi)
+
+        original_shape = tf.shape(x)
+        total_batch_size = tf.reduce_prod(original_shape[:-1])
+        in_feats = original_shape[-1]
+        
+        x_flat = tf.reshape(x, (total_batch_size, in_feats))
+        x_rshp = tf.reshape(x_flat, (total_batch_size, 1, in_feats, 1))
+        
+        k = tf.reshape(
+            tf.range(1, self.grid_size + 1, dtype=tf.float32),
+            (1, 1, 1, self.grid_size)
+        )
+        
+        angles = x_rshp * k
+        
+        c = tf.cos(angles)
+        s = tf.sin(angles)
+        
+        c = tf.reshape(c, (1, total_batch_size, in_feats, self.grid_size))
+        s = tf.reshape(s, (1, total_batch_size, in_feats, self.grid_size))
+        
+        cs = tf.concat([c, s], axis=0)
+        
+        y = tf.einsum("dbik,djik->bj", cs, self.fouriercoeffs)
+        
+        if self.add_bias:
+            y = y + self.bias
+            
+        final_shape = tf.concat(
+            [original_shape[:-1], [self.out_features]], axis=0
+        )
+        y = tf.reshape(y, final_shape)
+        
+        return y
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[:-1] + (self.out_features,)
+        
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "out_features": self.out_features,
+            "grid_size": self.grid_size,
+            "add_bias": self.add_bias,
+            "domain": self.domain
+        })
+        return config
+
+    
 # ============================================================================
 # FEATURE GENERATION FUNCTIONS 
 # ============================================================================
@@ -368,10 +405,10 @@ def generate_lig_inter_features(smiles): #Intermolecular Ligand, input smiles li
         features.append(Descriptors.MinAbsPartialCharge(mol))
         
         #Polar surface
-        features.append(MolSurf.TPSA(mol))#The sum of the surface areas of all polar atoms (mostly oxygen and nitrogen) and their attached hydrogens.High TPSA â†’ more polar, less membrane permeable, more soluble, Low TPSA â†’ less polar, more membrane permeable (good for oral drugs)
+        features.append(MolSurf.TPSA(mol))#The sum of the surface areas of all polar atoms (mostly oxygen and nitrogen) and their attached hydrogens.High TPSA → more polar, less membrane permeable, more soluble, Low TPSA → less polar, more membrane permeable (good for oral drugs)
         
-        features.append(MolSurf.LabuteASA(mol))#An approximation of the total solvent-accessible surface area (SASA) of the molecule, calculated using Labuteâ€™s algorithm. #Reflects molecular size and hydrophobic surface exposure
-         #13 #Ai=Siâ‹…Pi, S = 4Ï€r^2i , Pi=1âˆ’jâˆ(1âˆ’fij
+        features.append(MolSurf.LabuteASA(mol))#An approximation of the total solvent-accessible surface area (SASA) of the molecule, calculated using Labute’s algorithm. #Reflects molecular size and hydrophobic surface exposure
+         #13 #Ai=Si⋅Pi, S = 4πr^2i , Pi=1−j∏(1−fij
         # S=total spherical surface area of atom , Pi=atomic solvation parameter, fij=fraction of atom i's surface area in contact with atom j
 
         features.append(Crippen.MolMR(mol))#The Ghose-Crippen formula is an atom-contribution method used to estimate the octanol-water partition coefficient (log P) and molar refractivity (MR) of a molecule.
@@ -584,7 +621,7 @@ def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra):
     H_frac_lipinski = safe_divide(lig_inter[0], lig_inter[1], default=0.0) + safe_divide(mut_inter[1], mut_inter[0], default=0.0)
     lig_mut_inter.append(H_frac_lipinski)
     
-    H_frac_total = safe_divide(lig_inter[4], mut_inter[5], default=0.0) + safe_divide(mut_inter[5], mut_inter[4], default=0.0)
+    H_frac_total = safe_divide(lig_inter[4], lig_inter[5], default=0.0) + safe_divide(mut_inter[5], mut_inter[4], default=0.0)
     lig_mut_inter.append(H_frac_total)
     
 
@@ -944,6 +981,7 @@ def build_priority_hierarchical_model(feature_dims):
 # RNN SEQUENTIAL MODEL WITH KAN (MERGED)
 # ============================================================================
 
+
 def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
     """
     Build RNN model with BiLSTM and parallel BiGRU + KAN path.
@@ -962,27 +1000,28 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
     lstm_out = Bidirectional(LSTM(64, return_sequences=False, dropout=0.2))(lstm_out)
     lstm_out = BatchNormalization()(lstm_out)
     
-    # Path 2: BiGRU + KAN (Updated)
-    logger.info("\n[Path 2: BiGRU + KAN]")
+    # Path 2: BiGRU + Fourier KAN (Updated)
+    logger.info("\n[Path 2: BiGRU + Fourier KAN]")
     gru_out1 = Bidirectional(GRU(128, return_sequences=True, dropout=0.2))(sequence_input)
     gru_out1 = BatchNormalization()(gru_out1)
     
-    # KAN Layer 1
-    kan_out1 = KANLayer(out_features=128, grid_size=5, name='fourier_kan_1')(gru_out1)
+    # Fourier KAN Layer 1
+    # Using grid_size=5 as per ka_gnn2 default
+    kan_out1 = FourierKANLayer(out_features=128, grid_size=5, domain="[-pi, pi]", name='fourier_kan_1')(gru_out1)
     
     # BiGRU 2
     gru_out2 = Bidirectional(GRU(64, return_sequences=False, dropout=0.2))(kan_out1)
     
-    # KAN Layer 2
-    kan_out2 = KANLayer(out_features=128, grid_size=5, name='fourier_kan_2')(gru_out2)
+    # Fourier KAN Layer 2
+    kan_out2 = FourierKANLayer(out_features=128, grid_size=5, domain="[-pi, pi]", name='fourier_kan_2')(gru_out2)
     kan_out2 = BatchNormalization()(kan_out2)
     
     # Combine Paths
-    logger.info("\n[Combining BiLSTM and BiGRU+KAN paths]")
+    logger.info("\n[Combining BiLSTM and BiGRU+FourierKAN paths]")
     combined = Concatenate()([lstm_out, kan_out2])
     
-    # Output Heads with KAN Integration
-    x = KANLayer(out_features=128, grid_size=5, name='final_merged_fourier_kan')(combined)
+    # Output Heads with Fourier KAN Integration
+    x = FourierKANLayer(out_features=128, grid_size=5, domain="[-pi, pi]", name='final_merged_fourier_kan')(combined)
     x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
     
@@ -1047,7 +1086,7 @@ def main():
     print(f"{'='*80}")
     
     if len(common_valid_indices) == 0:
-        print("\nâœ— ERROR: No samples remain after filtering!")
+        print("\n✗ ERROR: No samples remain after filtering!")
         sys.exit(1)
     
     # Filter to common indices
@@ -1131,12 +1170,195 @@ def main():
     )
 
     
+
     # ===== SAVE SCALERS =====
     with open('feature_scalers.pkl', 'wb') as f: pickle.dump(all_scalers, f)
     with open('y_scalers.pkl', 'wb') as f: pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
     unique_mutation_profiles.to_csv('mutation_profiles.csv', index=False)
 
-        # ===== PLOT TRAINING HISTORY =====
+    # ===== STAGE 4: PREDICTIONS =====
+    print("\n" + "="*80)
+    print("STAGE 4: PREDICTIONS")
+    print("="*80)
+    
+    all_control_results = []
+    all_drug_results = []
+    
+    for profile_idx, profile_row in unique_mutation_profiles.iterrows():
+        mutation_name = profile_row['tkd']
+        mut_site_smiles = [
+            profile_row['smiles_full_egfr'],
+            profile_row['smiles 718_862_atp_pocket'],
+            profile_row['smiles_p_loop'],
+            profile_row['smiles_c_helix'],
+            profile_row['smiles_l858r_a_loop_dfg_motif'],
+            profile_row['smiles_catalytic_hrd_motif']
+        ]
+        
+        print(f"\n--- Profile {profile_idx + 1}/{len(unique_mutation_profiles)}: {mutation_name} ---")
+        
+        if any(pd.isna(smi) for smi in mut_site_smiles):
+            continue
+        
+        # === CONTROL COMPOUNDS ===
+        print(f"  Processing {len(control_smiles)} control compounds...")
+        control_embeddings_all_sites = []
+        control_valid_idx = None
+        
+        for site_idx, (site_name, _) in enumerate(mutation_sites):
+            mut_smi_site = mut_site_smiles[site_idx]
+            mut_inter = generate_mut_inter_features(mut_smi_site)
+            mut_intra = generate_mut_intra_features(mut_smi_site)
+            
+            if mut_inter is None or mut_intra is None: continue
+            
+            control_features = {
+                'lig_inter': [], 'mut_inter': [], 'inter_interaction': [],
+                'lig_intra': [], 'mut_intra': [], 'intra_interaction': [],
+                'lig_mut_mix_inter_intra': [], 'final_fp_interaction': []
+            }
+            site_control_valid_idx = []
+            
+            for idx, control_smi in enumerate(control_smiles):
+                lig_inter = generate_lig_inter_features(control_smi)
+                lig_intra = generate_lig_intra_features(control_smi)
+                if lig_inter is None or lig_intra is None: continue
+                
+                lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra = generate_custom_features(
+                    lig_inter, mut_inter, lig_intra, mut_intra
+                )
+                inter_interaction = generate_inter_interaction_features(lig_inter, mut_inter)
+                intra_interaction = generate_intra_interaction_features(lig_intra, mut_intra)
+                
+                if len(lig_mut_inter) > 0: inter_interaction = np.concatenate([np.array(lig_mut_inter), inter_interaction])
+                if len(lig_mut_intra) > 0: intra_interaction = np.concatenate([np.array(lig_mut_intra), intra_interaction])
+                
+                final_fp_interaction = generate_final_interaction_features(control_smi, mut_smi_site)
+                
+                control_features['lig_inter'].append(lig_inter)
+                control_features['mut_inter'].append(mut_inter)
+                control_features['inter_interaction'].append(inter_interaction)
+                control_features['lig_intra'].append(lig_intra)
+                control_features['mut_intra'].append(mut_intra)
+                control_features['intra_interaction'].append(intra_interaction)
+                control_features['lig_mut_mix_inter_intra'].append(np.array(lig_mut_mix_inter_intra))
+                control_features['final_fp_interaction'].append(final_fp_interaction)
+                site_control_valid_idx.append(idx)
+            
+            if len(site_control_valid_idx) == 0: break
+            if control_valid_idx is None: control_valid_idx = site_control_valid_idx
+            
+            scaled_control = {}
+            scalers = all_scalers[site_idx]
+            for key in control_features.keys():
+                scaled_control[key] = scalers[key].transform(np.array(control_features[key]))
+            
+            h_model = load_model(f'hierarchical_model_{site_name}.h5', custom_objects={'KANLayer': KANLayer, 'FourierKANLayer': FourierKANLayer}, compile=False)
+            emb_model = Model(inputs=h_model.inputs, outputs=h_model.get_layer('embedding_output').output)
+            site_embeddings = emb_model.predict([scaled_control[k] for k in ['final_fp_interaction', 'lig_mut_mix_inter_intra', 'inter_interaction', 
+                                                                            'intra_interaction', 'mut_inter', 'lig_inter', 'mut_intra', 'lig_intra']], verbose=0)
+            control_embeddings_all_sites.append(site_embeddings)
+
+        if len(control_embeddings_all_sites) == 6 and control_valid_idx is not None:
+            control_sequential = np.stack(control_embeddings_all_sites, axis=1)
+            preds = rnn_model.predict(control_sequential, verbose=0)
+            c_activity = y_scaler1.inverse_transform(preds[0].reshape(-1, 1)).flatten()
+            c_activity = np.expm1(c_activity)
+            c_docking = y_scaler2.inverse_transform(preds[1].reshape(-1, 1)).flatten()
+            
+            for i, idx in enumerate(control_valid_idx):
+                all_control_results.append({
+                    'mutation_name': mutation_name,
+                    'control_name': control_name.iloc[idx],
+                    'compound_smiles': control_smiles.iloc[idx],
+                    'predicted_activity': c_activity[i],
+                    'predicted_docking': c_docking[i]
+                })
+
+        # === DRUG COMPOUNDS ===
+        print(f"  Processing {len(drug_smiles)} drug compounds...")
+        drug_embeddings_all_sites = []
+        drug_valid_idx = None
+        
+        for site_idx, (site_name, _) in enumerate(mutation_sites):
+            mut_smi_site = mut_site_smiles[site_idx]
+            mut_inter = generate_mut_inter_features(mut_smi_site)
+            mut_intra = generate_mut_intra_features(mut_smi_site)
+            
+            if mut_inter is None or mut_intra is None: continue
+            
+            drug_features = {
+                'lig_inter': [], 'mut_inter': [], 'inter_interaction': [],
+                'lig_intra': [], 'mut_intra': [], 'intra_interaction': [],
+                'lig_mut_mix_inter_intra': [], 'final_fp_interaction': []
+            }
+            site_drug_valid_idx = []
+            
+            for idx, drug_smi in enumerate(drug_smiles):
+                lig_inter = generate_lig_inter_features(drug_smi)
+                lig_intra = generate_lig_intra_features(drug_smi)
+                if lig_inter is None or lig_intra is None: continue
+                
+                lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra = generate_custom_features(
+                    lig_inter, mut_inter, lig_intra, mut_intra
+                )
+                inter_interaction = generate_inter_interaction_features(lig_inter, mut_inter)
+                intra_interaction = generate_intra_interaction_features(lig_intra, mut_intra)
+                
+                if len(lig_mut_inter) > 0: inter_interaction = np.concatenate([np.array(lig_mut_inter), inter_interaction])
+                if len(lig_mut_intra) > 0: intra_interaction = np.concatenate([np.array(lig_mut_intra), intra_interaction])
+                
+                final_fp_interaction = generate_final_interaction_features(drug_smi, mut_smi_site)
+                
+                drug_features['lig_inter'].append(lig_inter)
+                drug_features['mut_inter'].append(mut_inter)
+                drug_features['inter_interaction'].append(inter_interaction)
+                drug_features['lig_intra'].append(lig_intra)
+                drug_features['mut_intra'].append(mut_intra)
+                drug_features['intra_interaction'].append(intra_interaction)
+                drug_features['lig_mut_mix_inter_intra'].append(np.array(lig_mut_mix_inter_intra))
+                drug_features['final_fp_interaction'].append(final_fp_interaction)
+                site_drug_valid_idx.append(idx)
+            
+            if len(site_drug_valid_idx) == 0: break
+            if drug_valid_idx is None: drug_valid_idx = site_drug_valid_idx
+            
+            scaled_drug = {}
+            scalers = all_scalers[site_idx]
+            for key in drug_features.keys():
+                scaled_drug[key] = scalers[key].transform(np.array(drug_features[key]))
+            
+            h_model = load_model(f'hierarchical_model_{site_name}.h5', custom_objects={'KANLayer': KANLayer, 'FourierKANLayer': FourierKANLayer}, compile=False)
+            emb_model = Model(inputs=h_model.inputs, outputs=h_model.get_layer('embedding_output').output)
+            site_embeddings = emb_model.predict([scaled_drug[k] for k in ['final_fp_interaction', 'lig_mut_mix_inter_intra', 'inter_interaction', 
+                                                                          'intra_interaction', 'mut_inter', 'lig_inter', 'mut_intra', 'lig_intra']], verbose=0)
+            drug_embeddings_all_sites.append(site_embeddings)
+        
+        if len(drug_embeddings_all_sites) == 6 and drug_valid_idx is not None:
+            drug_sequential = np.stack(drug_embeddings_all_sites, axis=1)
+            preds = rnn_model.predict(drug_sequential, verbose=0)
+            d_activity = y_scaler1.inverse_transform(preds[0].reshape(-1, 1)).flatten()
+            d_activity = np.expm1(d_activity)
+            d_docking = y_scaler2.inverse_transform(preds[1].reshape(-1, 1)).flatten()
+            
+            for i, idx in enumerate(drug_valid_idx):
+                all_drug_results.append({
+                    'mutation_name': mutation_name,
+                    'compound_smiles': drug_smiles.iloc[idx],
+                    'predicted_activity': d_activity[i],
+                    'predicted_docking': d_docking[i]
+                })
+    
+    # Save results
+    df_control_results = pd.DataFrame(all_control_results)
+    df_drug_results = pd.DataFrame(all_drug_results)
+    df_control_results.to_csv('control_predictions_rnn.csv', index=False)
+    df_drug_results.to_csv('drug_predictions_rnn.csv', index=False)
+    
+    print(f"\n✓ Control Results: {len(df_control_results)} predictions saved")
+    print(f"✓ Drug Results: {len(df_drug_results)} predictions saved")
+
+    # ===== PLOT TRAINING HISTORY =====
     print("\n" + "="*80)
     print("PLOTTING TRAINING HISTORY")
     print("="*80)
@@ -1165,224 +1387,10 @@ def main():
     plt.savefig('kan_training_history.png', dpi=300, bbox_inches='tight')
     plt.show()
     
-    print("âœ“ Training history plot saved: kan_training_history.png")
-
-    # # ===== STAGE 4: PREDICTIONS =====
-    # print("\n" + "="*80)
-    # print("STAGE 4: PREDICTIONS")
-    # print("="*80)
-    
-    # all_control_results = []
-    # all_drug_results = []
-    
-    # for profile_idx, profile_row in unique_mutation_profiles.iterrows():
-    #     mutation_name = profile_row['tkd']
-    #     mut_site_smiles = [
-    #         profile_row['smiles_full_egfr'],
-    #         profile_row['smiles 718_862_atp_pocket'],
-    #         profile_row['smiles_p_loop'],
-    #         profile_row['smiles_c_helix'],
-    #         profile_row['smiles_l858r_a_loop_dfg_motif'],
-    #         profile_row['smiles_catalytic_hrd_motif']
-    #     ]
-        
-    #     print(f"\n--- Profile {profile_idx + 1}/{len(unique_mutation_profiles)}: {mutation_name} ---")
-        
-    #     if any(pd.isna(smi) for smi in mut_site_smiles):
-    #         continue
-        
-    #     # === CONTROL COMPOUNDS ===
-    #     print(f"  Processing {len(control_smiles)} control compounds...")
-    #     control_embeddings_all_sites = []
-    #     control_valid_idx = None
-        
-    #     for site_idx, (site_name, _) in enumerate(mutation_sites):
-    #         mut_smi_site = mut_site_smiles[site_idx]
-    #         mut_inter = generate_mut_inter_features(mut_smi_site)
-    #         mut_intra = generate_mut_intra_features(mut_smi_site)
-            
-    #         if mut_inter is None or mut_intra is None: continue
-            
-    #         control_features = {
-    #             'lig_inter': [], 'mut_inter': [], 'inter_interaction': [],
-    #             'lig_intra': [], 'mut_intra': [], 'intra_interaction': [],
-    #             'lig_mut_mix_inter_intra': [], 'final_fp_interaction': []
-    #         }
-    #         site_control_valid_idx = []
-            
-    #         for idx, control_smi in enumerate(control_smiles):
-    #             lig_inter = generate_lig_inter_features(control_smi)
-    #             lig_intra = generate_lig_intra_features(control_smi)
-    #             if lig_inter is None or lig_intra is None: continue
-                
-    #             lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra = generate_custom_features(
-    #                 lig_inter, mut_inter, lig_intra, mut_intra
-    #             )
-    #             inter_interaction = generate_inter_interaction_features(lig_inter, mut_inter)
-    #             intra_interaction = generate_intra_interaction_features(lig_intra, mut_intra)
-                
-    #             if len(lig_mut_inter) > 0: inter_interaction = np.concatenate([np.array(lig_mut_inter), inter_interaction])
-    #             if len(lig_mut_intra) > 0: intra_interaction = np.concatenate([np.array(lig_mut_intra), intra_interaction])
-                
-    #             final_fp_interaction = generate_final_interaction_features(control_smi, mut_smi_site)
-                
-    #             control_features['lig_inter'].append(lig_inter)
-    #             control_features['mut_inter'].append(mut_inter)
-    #             control_features['inter_interaction'].append(inter_interaction)
-    #             control_features['lig_intra'].append(lig_intra)
-    #             control_features['mut_intra'].append(mut_intra)
-    #             control_features['intra_interaction'].append(intra_interaction)
-    #             control_features['lig_mut_mix_inter_intra'].append(np.array(lig_mut_mix_inter_intra))
-    #             control_features['final_fp_interaction'].append(final_fp_interaction)
-    #             site_control_valid_idx.append(idx)
-            
-    #         if len(site_control_valid_idx) == 0: break
-    #         if control_valid_idx is None: control_valid_idx = site_control_valid_idx
-            
-    #         scaled_control = {}
-    #         scalers = all_scalers[site_idx]
-    #         for key in control_features.keys():
-    #             scaled_control[key] = scalers[key].transform(np.array(control_features[key]))
-            
-    #         h_model = load_model(f'hierarchical_model_{site_name}.h5', custom_objects={'KANLayer': KANLayer}, compile=False)
-    #         emb_model = Model(inputs=h_model.inputs, outputs=h_model.get_layer('embedding_output').output)
-    #         site_embeddings = emb_model.predict([scaled_control[k] for k in ['final_fp_interaction', 'lig_mut_mix_inter_intra', 'inter_interaction', 
-    #                                                                         'intra_interaction', 'mut_inter', 'lig_inter', 'mut_intra', 'lig_intra']], verbose=0)
-    #         control_embeddings_all_sites.append(site_embeddings)
-
-    #     if len(control_embeddings_all_sites) == 6 and control_valid_idx is not None:
-    #         control_sequential = np.stack(control_embeddings_all_sites, axis=1)
-    #         preds = rnn_model.predict(control_sequential, verbose=0)
-    #         c_activity = y_scaler1.inverse_transform(preds[0].reshape(-1, 1)).flatten()
-    #         c_activity = np.expm1(c_activity)
-    #         c_docking = y_scaler2.inverse_transform(preds[1].reshape(-1, 1)).flatten()
-            
-    #         for i, idx in enumerate(control_valid_idx):
-    #             all_control_results.append({
-    #                 'mutation_name': mutation_name,
-    #                 'control_name': control_name.iloc[idx],
-    #                 'compound_smiles': control_smiles.iloc[idx],
-    #                 'predicted_activity': c_activity[i],
-    #                 'predicted_docking': c_docking[i]
-    #             })
-
-    #     # === DRUG COMPOUNDS ===
-    #     print(f"  Processing {len(drug_smiles)} drug compounds...")
-    #     drug_embeddings_all_sites = []
-    #     drug_valid_idx = None
-        
-    #     for site_idx, (site_name, _) in enumerate(mutation_sites):
-    #         mut_smi_site = mut_site_smiles[site_idx]
-    #         mut_inter = generate_mut_inter_features(mut_smi_site)
-    #         mut_intra = generate_mut_intra_features(mut_smi_site)
-            
-    #         if mut_inter is None or mut_intra is None: continue
-            
-    #         drug_features = {
-    #             'lig_inter': [], 'mut_inter': [], 'inter_interaction': [],
-    #             'lig_intra': [], 'mut_intra': [], 'intra_interaction': [],
-    #             'lig_mut_mix_inter_intra': [], 'final_fp_interaction': []
-    #         }
-    #         site_drug_valid_idx = []
-            
-    #         for idx, drug_smi in enumerate(drug_smiles):
-    #             lig_inter = generate_lig_inter_features(drug_smi)
-    #             lig_intra = generate_lig_intra_features(drug_smi)
-    #             if lig_inter is None or lig_intra is None: continue
-                
-    #             lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra = generate_custom_features(
-    #                 lig_inter, mut_inter, lig_intra, mut_intra
-    #             )
-    #             inter_interaction = generate_inter_interaction_features(lig_inter, mut_inter)
-    #             intra_interaction = generate_intra_interaction_features(lig_intra, mut_intra)
-                
-    #             if len(lig_mut_inter) > 0: inter_interaction = np.concatenate([np.array(lig_mut_inter), inter_interaction])
-    #             if len(lig_mut_intra) > 0: intra_interaction = np.concatenate([np.array(lig_mut_intra), intra_interaction])
-                
-    #             final_fp_interaction = generate_final_interaction_features(drug_smi, mut_smi_site)
-                
-    #             drug_features['lig_inter'].append(lig_inter)
-    #             drug_features['mut_inter'].append(mut_inter)
-    #             drug_features['inter_interaction'].append(inter_interaction)
-    #             drug_features['lig_intra'].append(lig_intra)
-    #             drug_features['mut_intra'].append(mut_intra)
-    #             drug_features['intra_interaction'].append(intra_interaction)
-    #             drug_features['lig_mut_mix_inter_intra'].append(np.array(lig_mut_mix_inter_intra))
-    #             drug_features['final_fp_interaction'].append(final_fp_interaction)
-    #             site_drug_valid_idx.append(idx)
-            
-    #         if len(site_drug_valid_idx) == 0: break
-    #         if drug_valid_idx is None: drug_valid_idx = site_drug_valid_idx
-            
-    #         scaled_drug = {}
-    #         scalers = all_scalers[site_idx]
-    #         for key in drug_features.keys():
-    #             scaled_drug[key] = scalers[key].transform(np.array(drug_features[key]))
-            
-    #         h_model = load_model(f'hierarchical_model_{site_name}.h5', custom_objects={'KANLayer': KANLayer}, compile=False)
-    #         emb_model = Model(inputs=h_model.inputs, outputs=h_model.get_layer('embedding_output').output)
-    #         site_embeddings = emb_model.predict([scaled_drug[k] for k in ['final_fp_interaction', 'lig_mut_mix_inter_intra', 'inter_interaction', 
-    #                                                                       'intra_interaction', 'mut_inter', 'lig_inter', 'mut_intra', 'lig_intra']], verbose=0)
-    #         drug_embeddings_all_sites.append(site_embeddings)
-        
-    #     if len(drug_embeddings_all_sites) == 6 and drug_valid_idx is not None:
-    #         drug_sequential = np.stack(drug_embeddings_all_sites, axis=1)
-    #         preds = rnn_model.predict(drug_sequential, verbose=0)
-    #         d_activity = y_scaler1.inverse_transform(preds[0].reshape(-1, 1)).flatten()
-    #         d_activity = np.expm1(d_activity)
-    #         d_docking = y_scaler2.inverse_transform(preds[1].reshape(-1, 1)).flatten()
-            
-    #         for i, idx in enumerate(drug_valid_idx):
-    #             all_drug_results.append({
-    #                 'mutation_name': mutation_name,
-    #                 'compound_smiles': drug_smiles.iloc[idx],
-    #                 'predicted_activity': d_activity[i],
-    #                 'predicted_docking': d_docking[i]
-    #             })
-    
-    # # Save results
-    # df_control_results = pd.DataFrame(all_control_results)
-    # df_drug_results = pd.DataFrame(all_drug_results)
-    # df_control_results.to_csv('control_predictions_rnn.csv', index=False)
-    # df_drug_results.to_csv('drug_predictions_rnn.csv', index=False)
-    
-    # print(f"\nâœ“ Control Results: {len(df_control_results)} predictions saved")
-    # print(f"âœ“ Drug Results: {len(df_drug_results)} predictions saved")
-
-    # # ===== PLOT TRAINING HISTORY =====
-    # print("\n" + "="*80)
-    # print("PLOTTING TRAINING HISTORY")
-    # print("="*80)
-    
-    # fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # # Loss plot
-    # axes[0].plot(rnn_history.history['loss'], label='Train Loss', linewidth=2, color='#2E86AB')
-    # axes[0].plot(rnn_history.history['val_loss'], label='Val Loss', linewidth=2, color='#A23B72')
-    # axes[0].set_xlabel('Epoch', fontsize=12)
-    # axes[0].set_ylabel('Loss (MSE)', fontsize=12)
-    # axes[0].set_title('RNN-LSTM-KAN Model - Loss', fontsize=14, fontweight='bold')
-    # axes[0].legend(fontsize=10)
-    # axes[0].grid(True, alpha=0.3)
-    
-    # # MAE plot
-    # axes[1].plot(rnn_history.history['final_activity_output_mae'], label='Train Activity MAE', linewidth=2, color='#2E86AB')
-    # axes[1].plot(rnn_history.history['val_final_activity_output_mae'], label='Val Activity MAE', linewidth=2, color='#A23B72')
-    # axes[1].set_xlabel('Epoch', fontsize=12)
-    # axes[1].set_ylabel('MAE', fontsize=12)
-    # axes[1].set_title('RNN-LSTM-KAN Model - MAE', fontsize=14, fontweight='bold')
-    # axes[1].legend(fontsize=10)
-    # axes[1].grid(True, alpha=0.3)
-    
-    # plt.tight_layout()
-    # plt.savefig('kan_training_history.png', dpi=300, bbox_inches='tight')
-    # plt.show()
-    
-    # print("âœ“ Training history plot saved: kan_training_history.png")
+    print("✓ Training history plot saved: kan_training_history.png")
 
 if __name__ == "__main__":
     main()
-
 
 #TODO
 # 1. Find the most suiiable KAN layer 
