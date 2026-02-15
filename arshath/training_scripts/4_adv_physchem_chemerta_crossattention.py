@@ -15,6 +15,7 @@ Key Changes:
 import os
 import sys
 import pickle
+import hashlib
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -50,6 +51,40 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 np.random.seed(42)
 tf.random.set_seed(42)
 
+# === Disk-backed Feature Cache ===
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', '.feature_cache')
+_cache_hits = 0
+_cache_misses = 0
+
+def _get_cache_path(smiles):
+    """Return the cache file path for a given SMILES string."""
+    md5 = hashlib.md5(smiles.encode('utf-8')).hexdigest()
+    return os.path.join(_CACHE_DIR, f'{md5}.pkl')
+
+def _load_cached_features(smiles):
+    """Load cached inter/intra features from disk. Returns (inter, intra) or None."""
+    global _cache_hits, _cache_misses
+    path = _get_cache_path(smiles)
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            _cache_hits += 1
+            return data['inter'], data['intra']
+        except Exception:
+            pass
+    _cache_misses += 1
+    return None
+
+def _save_cached_features(smiles, inter, intra):
+    """Save computed inter/intra features to disk cache."""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    path = _get_cache_path(smiles)
+    try:
+        with open(path, 'wb') as f:
+            pickle.dump({'inter': inter, 'intra': intra}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
 # Fixed safe_divide and feature generation functions
 def safe_divide(numerator, denominator, default=0.0):
@@ -60,13 +95,102 @@ def safe_divide(numerator, denominator, default=0.0):
         result = np.where(denominator != 0, numerator / denominator, default)
         return result
 
+def _generate_lig_features(smiles):
+    """Compute both inter and intra features with a single MolFromSmiles call.
+    Checks disk cache first; writes to disk cache on miss.
+    Returns (inter_array, intra_array) or (None, None)."""
+    cached = _load_cached_features(smiles)
+    if cached is not None:
+        return cached
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None, None
+
+    try:
+        # --- inter features (25) ---
+        inter = []
+        inter.append(Lipinski.NumHDonors(mol))
+        inter.append(Lipinski.NumHAcceptors(mol))
+        inter.append(Lipinski.NHOHCount(mol))
+        inter.append(Lipinski.NOCount(mol))
+        inter.append(rdMolDescriptors.CalcNumHBD(mol))
+        inter.append(rdMolDescriptors.CalcNumHBA(mol))
+        max_pc = Descriptors.MaxPartialCharge(mol)
+        min_pc = Descriptors.MinPartialCharge(mol)
+        inter.append(max_pc)
+        inter.append(min_pc)
+        inter.append(Descriptors.MaxAbsPartialCharge(mol))
+        inter.append(max_pc - min_pc)
+        inter.append(Descriptors.MinAbsPartialCharge(mol))
+        inter.append(MolSurf.TPSA(mol))
+        inter.append(MolSurf.LabuteASA(mol))
+        inter.append(Crippen.MolMR(mol))
+        inter.append(Descriptors.MolWt(mol))
+        inter.append(Lipinski.HeavyAtomCount(mol))
+        inter.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+        inter.append(Crippen.MolLogP(mol))
+        inter.append(Descriptors.FractionCSP3(mol))
+        inter.append(Lipinski.NumAromaticRings(mol))
+        aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
+        inter.append(aromatic_atoms)
+        inter.append(Descriptors.NumAromaticCarbocycles(mol))
+        inter.append(Descriptors.NumAromaticHeterocycles(mol))
+        inter.append(Fragments.fr_halogen(mol))
+        inter.append(Lipinski.NumRotatableBonds(mol))
+        inter_arr = np.array(inter)
+
+        # --- intra features (30) ---
+        intra = []
+        num_bonds = mol.GetNumBonds()
+        intra.append(num_bonds)
+        single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
+        double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
+        triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
+        aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
+        intra.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
+        avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
+        intra.append(avg_bond_order)
+        intra.append(Lipinski.NumRotatableBonds(mol))
+        intra.append(Lipinski.RingCount(mol))
+        intra.append(Lipinski.NumAromaticRings(mol))
+        rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
+        fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
+        intra.append(fraction_rigid)
+        intra.append(Descriptors.NumAromaticCarbocycles(mol))
+        intra.append(Descriptors.NumAromaticHeterocycles(mol))
+        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
+        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
+        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
+        intra.extend([sp_carbons, sp2_carbons, sp3_carbons])
+        ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
+        avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
+        min_ring_size = min(ring_sizes) if ring_sizes else 0
+        intra.extend([avg_ring_size, min_ring_size])
+        three_member_rings = sum(1 for size in ring_sizes if size == 3)
+        four_member_rings = sum(1 for size in ring_sizes if size == 4)
+        intra.extend([three_member_rings, four_member_rings])
+        intra.append(GraphDescriptors.BertzCT(mol))
+        intra.append(GraphDescriptors.Kappa1(mol))
+        intra.append(GraphDescriptors.Kappa2(mol))
+        intra.append(GraphDescriptors.Kappa3(mol))
+        intra.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
+        intra.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
+        intra_arr = np.array(intra)
+
+        _save_cached_features(smiles, inter_arr, intra_arr)
+        return inter_arr, intra_arr
+
+    except Exception:
+        return None, None
+
 def generate_lig_inter_features(smiles): #Intermolecular Ligand, input smiles ligand, returns np array
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
-    
+
     features = []
-    
+
     try:
         #Hydrogen Bonding
         features.append(Lipinski.NumHDonors(mol))
@@ -406,10 +530,12 @@ def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra):
     
     return lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra
 
-def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series):
+def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series, ligand_cache=None, mutation_cache=None):
     print('\nGenerating hierarchical features...')
-    ligand_cache = {}
-    mutation_cache = {}
+    if ligand_cache is None:
+        ligand_cache = {}
+    if mutation_cache is None:
+        mutation_cache = {}
     interaction_cache = {}
 
     lig_inter_list = []
@@ -428,16 +554,16 @@ def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series)
         if lig_smi in ligand_cache:
             lig_inter, lig_intra = ligand_cache[lig_smi]
         else:
-            lig_inter = generate_lig_inter_features(lig_smi)
-            lig_intra = generate_lig_intra_features(lig_smi)
-            ligand_cache[lig_smi] = (lig_inter, lig_intra)
+            lig_inter, lig_intra = _generate_lig_features(lig_smi)
+            if lig_inter is not None and lig_intra is not None:
+                ligand_cache[lig_smi] = (lig_inter, lig_intra)
 
         if mut_smi in mutation_cache:
             mut_inter, mut_intra = mutation_cache[mut_smi]
         else:
-            mut_inter = generate_mut_inter_features(mut_smi)
-            mut_intra = generate_mut_intra_features(mut_smi)
-            mutation_cache[mut_smi] = (mut_inter, mut_intra)
+            mut_inter, mut_intra = _generate_lig_features(mut_smi)
+            if mut_inter is not None and mut_intra is not None:
+                mutation_cache[mut_smi] = (mut_inter, mut_intra)
 
         if any(f is None for f in [lig_inter, mut_inter, lig_intra, mut_intra]):
             continue
@@ -720,9 +846,12 @@ def keras_main():
     all_feature_dicts = []
     all_valid_indices = []
 
+    _persistent_ligand_cache = {}
+    _persistent_mutation_cache = {}
+
     for site_name, mut_smiles_series in mutation_sites:
         print(f"\n{'='*80}\nProcessing {site_name}\n{'='*80}")
-        feature_dict = generate_hierarchical_features(ligand_smiles_valid, mut_smiles_series)
+        feature_dict = generate_hierarchical_features(ligand_smiles_valid, mut_smiles_series, ligand_cache=_persistent_ligand_cache, mutation_cache=_persistent_mutation_cache)
         all_feature_dicts.append(feature_dict)
         all_valid_indices.append(set(feature_dict['valid_indices']))
 
@@ -1103,6 +1232,11 @@ def keras_main():
         print(f'Saved training history plot to {out_png}')
     except Exception as e:
         print('Could not generate training plot:', e)
+
+    print(f"\n--- Feature Cache Stats ---")
+    print(f"  Disk cache hits:   {_cache_hits}")
+    print(f"  Disk cache misses: {_cache_misses}")
+    print(f"  Cache directory:   {os.path.abspath(_CACHE_DIR)}")
 
 if __name__ == '__main__':
     keras_main()

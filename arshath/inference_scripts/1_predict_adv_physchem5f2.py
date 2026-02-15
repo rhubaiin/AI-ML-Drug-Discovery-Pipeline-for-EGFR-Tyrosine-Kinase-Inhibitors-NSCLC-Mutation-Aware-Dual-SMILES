@@ -10,6 +10,7 @@ to make predictions on new SMILES data.
 import os
 import sys
 import pickle
+import hashlib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -27,6 +28,130 @@ from rdkit import RDLogger
 
 # Disable RDKit warnings
 RDLogger.DisableLog('rdApp.*')
+
+# === Disk-backed Feature Cache ===
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', '.feature_cache')
+_cache_hits = 0
+_cache_misses = 0
+
+def _get_cache_path(smiles):
+    """Return the cache file path for a given SMILES string."""
+    md5 = hashlib.md5(smiles.encode('utf-8')).hexdigest()
+    return os.path.join(_CACHE_DIR, f'{md5}.pkl')
+
+def _load_cached_features(smiles):
+    """Load cached inter/intra features from disk. Returns (inter, intra) or None."""
+    global _cache_hits, _cache_misses
+    path = _get_cache_path(smiles)
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            _cache_hits += 1
+            return data['inter'], data['intra']
+        except Exception:
+            pass
+    _cache_misses += 1
+    return None
+
+def _save_cached_features(smiles, inter, intra):
+    """Save computed inter/intra features to disk cache."""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    path = _get_cache_path(smiles)
+    try:
+        with open(path, 'wb') as f:
+            pickle.dump({'inter': inter, 'intra': intra}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
+
+def _generate_lig_features(smiles):
+    """Compute both inter and intra features with a single MolFromSmiles call.
+    Checks disk cache first; writes to disk cache on miss.
+    Returns (inter_array, intra_array) or (None, None)."""
+    cached = _load_cached_features(smiles)
+    if cached is not None:
+        return cached
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None, None
+
+    try:
+        # --- inter features (25) ---
+        inter = []
+        inter.append(Lipinski.NumHDonors(mol))
+        inter.append(Lipinski.NumHAcceptors(mol))
+        inter.append(Lipinski.NHOHCount(mol))
+        inter.append(Lipinski.NOCount(mol))
+        inter.append(rdMolDescriptors.CalcNumHBD(mol))
+        inter.append(rdMolDescriptors.CalcNumHBA(mol))
+        max_pc = Descriptors.MaxPartialCharge(mol)
+        min_pc = Descriptors.MinPartialCharge(mol)
+        inter.append(max_pc)
+        inter.append(min_pc)
+        inter.append(Descriptors.MaxAbsPartialCharge(mol))
+        inter.append(max_pc - min_pc)
+        inter.append(Descriptors.MinAbsPartialCharge(mol))
+        inter.append(MolSurf.TPSA(mol))
+        inter.append(MolSurf.LabuteASA(mol))
+        inter.append(Crippen.MolMR(mol))
+        inter.append(Descriptors.MolWt(mol))
+        inter.append(Lipinski.HeavyAtomCount(mol))
+        inter.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+        inter.append(Crippen.MolLogP(mol))
+        inter.append(Descriptors.FractionCSP3(mol))
+        inter.append(Lipinski.NumAromaticRings(mol))
+        aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
+        inter.append(aromatic_atoms)
+        inter.append(Descriptors.NumAromaticCarbocycles(mol))
+        inter.append(Descriptors.NumAromaticHeterocycles(mol))
+        inter.append(Fragments.fr_halogen(mol))
+        inter.append(Lipinski.NumRotatableBonds(mol))
+        inter_arr = np.array(inter)
+
+        # --- intra features (30) ---
+        intra = []
+        num_bonds = mol.GetNumBonds()
+        intra.append(num_bonds)
+        single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
+        double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
+        triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
+        aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
+        intra.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
+        avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
+        intra.append(avg_bond_order)
+        intra.append(Lipinski.NumRotatableBonds(mol))
+        intra.append(Lipinski.RingCount(mol))
+        intra.append(Lipinski.NumAromaticRings(mol))
+        rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
+        fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
+        intra.append(fraction_rigid)
+        intra.append(Descriptors.NumAromaticCarbocycles(mol))
+        intra.append(Descriptors.NumAromaticHeterocycles(mol))
+        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
+        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
+        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
+        intra.extend([sp_carbons, sp2_carbons, sp3_carbons])
+        ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
+        avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
+        min_ring_size = min(ring_sizes) if ring_sizes else 0
+        intra.extend([avg_ring_size, min_ring_size])
+        three_member_rings = sum(1 for size in ring_sizes if size == 3)
+        four_member_rings = sum(1 for size in ring_sizes if size == 4)
+        intra.extend([three_member_rings, four_member_rings])
+        intra.append(GraphDescriptors.BertzCT(mol))
+        intra.append(GraphDescriptors.Kappa1(mol))
+        intra.append(GraphDescriptors.Kappa2(mol))
+        intra.append(GraphDescriptors.Kappa3(mol))
+        intra.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
+        intra.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
+        intra_arr = np.array(intra)
+
+        _save_cached_features(smiles, inter_arr, intra_arr)
+        return inter_arr, intra_arr
+
+    except Exception:
+        return None, None
 
 # ============================================================================
 # FEATURE GENERATION FUNCTIONS (Copied from adv_physchem5f2.py)
@@ -783,7 +908,8 @@ def evaluate_and_plot(df_results, output_dir, model_name):
 def make_predictions(input_csv, model_dir='.', output_dir='.'):
     """
     Make predictions using the trained hierarchical RNN model.
-    
+    Optimized: batch processing grouped by mutation, embedding models created once.
+
     Parameters:
     -----------
     input_csv : str
@@ -792,37 +918,37 @@ def make_predictions(input_csv, model_dir='.', output_dir='.'):
         Directory containing model files (default: current directory)
     output_dir : str
         Directory to save prediction outputs (default: current directory)
-        
+
     Returns:
     --------
     df_results : pd.DataFrame
         DataFrame with predictions
     """
-    
+
     print(f"Loading prediction data from: {input_csv}")
     df_pred = pd.read_csv(input_csv)
-    
+
     # Check required columns
     required_cols = ['smiles', 'tkd']
     if not all(col in df_pred.columns for col in required_cols):
         raise ValueError(f"Input CSV must contain 'smiles' and 'tkd' columns. Found: {df_pred.columns.tolist()}")
-    
+
     # Check if ground truth exists
     has_ground_truth = 'standard value' in df_pred.columns and 'dock' in df_pred.columns
-    
+
     # Load Model Files and Scalers
     print("Loading model files...")
     try:
         hierarchical_models, rnn_model, all_scalers, y_scaler1, y_scaler2 = load_models_and_scalers(model_dir)
-        
+
         # Load mutation profiles
         mutation_profiles_path = os.path.join(model_dir, 'mutation_profiles.csv')
         if not os.path.exists(mutation_profiles_path):
             raise FileNotFoundError(f"Mutation profiles not found: {mutation_profiles_path}")
-        
+
         df_mutation_profiles = pd.read_csv(mutation_profiles_path)
         print(f"  ✓ Loaded {len(df_mutation_profiles)} mutation profiles")
-        
+
     except FileNotFoundError as e:
         print(f"Error loading model files: {e}")
         print("Please ensure all model files are in the model directory:")
@@ -834,7 +960,7 @@ def make_predictions(input_csv, model_dir='.', output_dir='.'):
         return None
 
     print(f"\nTotal prediction samples: {len(df_pred)}")
-    
+
     # Recompile hierarchical models
     print("\nRecompiling hierarchical models...")
     for site_name, model in hierarchical_models.items():
@@ -853,7 +979,7 @@ def make_predictions(input_csv, model_dir='.', output_dir='.'):
                 'docking_output': ['mae', 'mse']
             }
         )
-    
+
     # Recompile RNN model
     rnn_model.compile(
         optimizer=Adam(learning_rate=0.001),
@@ -870,152 +996,225 @@ def make_predictions(input_csv, model_dir='.', output_dir='.'):
             'final_docking_output': ['mae', 'mse']
         }
     )
-    
-    # Process predictions
+
+    # Pre-create embedding models once (instead of inside per-sample loop)
+    embedding_models = {}
+    for site_name in MUTATION_SITES:
+        h_model = hierarchical_models[site_name]
+        embedding_models[site_name] = Model(
+            inputs=h_model.inputs,
+            outputs=h_model.get_layer('embedding_output').output
+        )
+    print(f"Pre-created {len(embedding_models)} embedding models")
+
+    # Site ordering for the prediction loop (must match training script order)
+    site_order = [
+        ('ATP_POCKET', 'smiles 718_862_atp_pocket'),
+        ('P_LOOP_HINGE', 'smiles_p_loop'),
+        ('C_HELIX', 'smiles_c_helix'),
+        ('DFG_A_LOOP', 'smiles_l858r_a_loop_dfg_motif'),
+        ('HRD_CAT', 'smiles_catalytic_hrd_motif'),
+        ('FULL_SMILES', 'smiles_full_egfr')
+    ]
+
+    # Batch processing: group by mutation type
     results = []
-    
-    print("\nProcessing predictions...")
-    for pred_idx, pred_row in df_pred.iterrows():
-        lig_smiles = pred_row['smiles']
-        mutant_name = pred_row['tkd']
-        
-        # Validate SMILES
-        if pd.isna(lig_smiles) or lig_smiles == '':
-            print(f"Warning: Empty SMILES at row {pred_idx}, skipping")
+    unique_mutations = df_pred['tkd'].unique()
+    print(f"\nProcessing {len(unique_mutations)} unique mutations in batch mode...")
+
+    # In-memory ligand feature cache for this run
+    _lig_feature_cache = {}
+
+    for mutation_name in unique_mutations:
+        mut_data = df_pred[df_pred['tkd'] == mutation_name]
+
+        # Find mutation profile
+        mutation_profile = df_mutation_profiles[df_mutation_profiles['tkd'] == mutation_name]
+        if len(mutation_profile) == 0:
+            print(f"  Warning: Mutation '{mutation_name}' not found in training data, skipping {len(mut_data)} samples")
+            continue
+        mutation_profile = mutation_profile.iloc[0]
+
+        # Get mutation site SMILES
+        mut_site_smiles = {}
+        skip_mutation = False
+        for site_name, site_col in site_order:
+            smi = mutation_profile[site_col]
+            if pd.isna(smi) or smi == '':
+                print(f"  Warning: Missing SMILES for {mutation_name} at {site_name}, skipping")
+                skip_mutation = True
+                break
+            mut_site_smiles[site_name] = smi
+        if skip_mutation:
             continue
 
-        # Validate Mutation
-        if pd.isna(mutant_name):
-            print(f"Warning: Empty mutation at row {pred_idx}, skipping")
-            continue
-        
-        # Find mutation profile
-        mutation_profile = df_mutation_profiles[df_mutation_profiles['tkd'] == mutant_name]
-        
-        if len(mutation_profile) == 0:
-            print(f"Warning: Mutation '{mutant_name}' not found in training data, skipping")
-            continue
-        
-        mutation_profile = mutation_profile.iloc[0]
-        
-        # Get mutation SMILES for all sites
-        full_smiles = mutation_profile['smiles_full_egfr']
-        mut_atp = mutation_profile['smiles 718_862_atp_pocket']
-        mut_p_loop = mutation_profile['smiles_p_loop']
-        mut_c_helix = mutation_profile['smiles_c_helix']
-        mut_dfg_a_loop = mutation_profile['smiles_l858r_a_loop_dfg_motif']
-        mut_hrd_cat = mutation_profile['smiles_catalytic_hrd_motif']
-        
-        # Process through each hierarchical site
-        embeddings_all_sites = []
-        valid_site_processing = True
-        
-        for site_idx, (site_name, mutation_smiles) in enumerate([
-            ('ATP_POCKET', mut_atp),
-            ('P_LOOP_HINGE', mut_p_loop),
-            ('C_HELIX', mut_c_helix),
-            ('DFG_A_LOOP', mut_dfg_a_loop),
-            ('HRD_CAT', mut_hrd_cat),
-            ('FULL_SMILES', full_smiles)
-        ]):
-            
-            # Generate features using the correct function
-            feature_dict = generate_all_features(lig_smiles, mutation_smiles)
-            
-            if feature_dict is None:
-                print(f"Warning: Could not generate features for {mutant_name} at {site_name}, skipping this compound")
-                valid_site_processing = False
+        print(f"\n  Processing mutation: {mutation_name} ({len(mut_data)} compounds)")
+
+        # Pre-compute mutation features for each site (shared across all ligands)
+        mut_features_by_site = {}
+        skip_mutation = False
+        for site_name, _ in site_order:
+            mut_smi = mut_site_smiles[site_name]
+            mut_inter, mut_intra = _generate_lig_features(mut_smi)
+            if mut_inter is None or mut_intra is None:
+                print(f"    Warning: Failed mutation features for {site_name}")
+                skip_mutation = True
                 break
-            
-            # Scale features
-            scalers = all_scalers[site_idx]
-            scaled_features = {
-                'final_fp_interaction': scalers['final_fp_interaction'].transform(feature_dict['final_fp_interaction'].reshape(1, -1)),
-                'lig_mut_mix_inter_intra': scalers['lig_mut_mix_inter_intra'].transform(feature_dict['lig_mut_mix_inter_intra'].reshape(1, -1)),
-                'inter_interaction': scalers['inter_interaction'].transform(feature_dict['inter_interaction'].reshape(1, -1)),
-                'intra_interaction': scalers['intra_interaction'].transform(feature_dict['intra_interaction'].reshape(1, -1)),
-                'mut_inter': scalers['mut_inter'].transform(feature_dict['mut_inter'].reshape(1, -1)),
-                'lig_inter': scalers['lig_inter'].transform(feature_dict['lig_inter'].reshape(1, -1)),
-                'mut_intra': scalers['mut_intra'].transform(feature_dict['mut_intra'].reshape(1, -1)),
-                'lig_intra': scalers['lig_intra'].transform(feature_dict['lig_intra'].reshape(1, -1))
-            }
-            
-            # Get embedding from hierarchical model
-            hierarchical_model = hierarchical_models[site_name]
-            embedding_model = Model(
-                inputs=hierarchical_model.inputs,
-                outputs=hierarchical_model.get_layer('embedding_output').output
-            )
-            
-            site_embedding = embedding_model.predict([
-                scaled_features['final_fp_interaction'],
-                scaled_features['lig_mut_mix_inter_intra'],
-                scaled_features['inter_interaction'],
-                scaled_features['intra_interaction'],
-                scaled_features['mut_inter'],
-                scaled_features['lig_inter'],
-                scaled_features['mut_intra'],
-                scaled_features['lig_intra']
-            ], verbose=0)
-            
-            embeddings_all_sites.append(site_embedding)
-        
-        if not valid_site_processing:
+            mut_features_by_site[site_name] = (mut_inter, mut_intra)
+        if skip_mutation:
             continue
-        
-        # Stack embeddings for RNN
+
+        # Batch-compute ligand features for all compounds in this mutation group
+        valid_rows = []  # (original_idx, row, lig_inter, lig_intra)
+        for idx, row in mut_data.iterrows():
+            lig_smiles = row['smiles']
+            if pd.isna(lig_smiles) or lig_smiles == '':
+                continue
+
+            if lig_smiles in _lig_feature_cache:
+                lig_inter, lig_intra = _lig_feature_cache[lig_smiles]
+            else:
+                lig_inter, lig_intra = _generate_lig_features(lig_smiles)
+                if lig_inter is not None and lig_intra is not None:
+                    _lig_feature_cache[lig_smiles] = (lig_inter, lig_intra)
+
+            if lig_inter is None or lig_intra is None:
+                continue
+            valid_rows.append((idx, row, lig_inter, lig_intra))
+
+        if not valid_rows:
+            print(f"    No valid compounds for {mutation_name}")
+            continue
+
+        n_valid = len(valid_rows)
+
+        # For each site, batch-generate all features and batch-predict embeddings
+        embeddings_all_sites = []  # list of (n_valid, embedding_dim) arrays
+        site_failed = False
+
+        for site_idx, (site_name, _) in enumerate(site_order):
+            mut_inter, mut_intra = mut_features_by_site[site_name]
+
+            # Batch-build feature arrays
+            batch_features = {
+                'lig_inter': [], 'mut_inter': [], 'inter_interaction': [],
+                'lig_intra': [], 'mut_intra': [], 'intra_interaction': [],
+                'lig_mut_mix_inter_intra': [], 'final_fp_interaction': []
+            }
+
+            batch_valid = []
+            for i, (orig_idx, row, lig_inter, lig_intra) in enumerate(valid_rows):
+                lig_smiles = row['smiles']
+                mut_smi = mut_site_smiles[site_name]
+
+                lig_mut_inter, lig_mut_intra, lig_mut_mix = generate_custom_features(
+                    lig_inter, mut_inter, lig_intra, mut_intra
+                )
+                inter_interaction = generate_inter_interaction_features(lig_inter, mut_inter)
+                intra_interaction = generate_intra_interaction_features(lig_intra, mut_intra)
+
+                if len(lig_mut_inter) > 0:
+                    inter_interaction = np.concatenate([np.array(lig_mut_inter), inter_interaction])
+                if len(lig_mut_intra) > 0:
+                    intra_interaction = np.concatenate([np.array(lig_mut_intra), intra_interaction])
+
+                final_fp = generate_final_interaction_features(lig_smiles, mut_smi)
+
+                batch_features['lig_inter'].append(lig_inter)
+                batch_features['mut_inter'].append(mut_inter)
+                batch_features['inter_interaction'].append(inter_interaction)
+                batch_features['lig_intra'].append(lig_intra)
+                batch_features['mut_intra'].append(mut_intra)
+                batch_features['intra_interaction'].append(intra_interaction)
+                batch_features['lig_mut_mix_inter_intra'].append(np.array(lig_mut_mix))
+                batch_features['final_fp_interaction'].append(final_fp)
+                batch_valid.append(i)
+
+            if not batch_valid:
+                site_failed = True
+                break
+
+            # Batch scale
+            scalers = all_scalers[site_idx]
+            scaled = {}
+            for key in batch_features:
+                scaled[key] = scalers[key].transform(np.array(batch_features[key]))
+
+            # Batch predict embeddings
+            site_emb = embedding_models[site_name].predict([
+                scaled['final_fp_interaction'],
+                scaled['lig_mut_mix_inter_intra'],
+                scaled['inter_interaction'],
+                scaled['intra_interaction'],
+                scaled['mut_inter'],
+                scaled['lig_inter'],
+                scaled['mut_intra'],
+                scaled['lig_intra']
+            ], verbose=0)
+
+            embeddings_all_sites.append(site_emb)
+
+        if site_failed or len(embeddings_all_sites) != 6:
+            print(f"    Failed to process all sites for {mutation_name}")
+            continue
+
+        # Stack embeddings: (n_valid, 6, embedding_dim)
         sequential_input = np.stack(embeddings_all_sites, axis=1)
-        
-        # Get final predictions from RNN
+
+        # Batch predict through RNN
         predictions = rnn_model.predict(sequential_input, verbose=0)
-        pred_activity_scaled = predictions[0].flatten()[0]
-        pred_docking_scaled = predictions[1].flatten()[0]
-        
-        # Inverse transform
-        pred_activity_log1p = y_scaler1.inverse_transform([[pred_activity_scaled]])[0, 0]
+        pred_activity_scaled = predictions[0].flatten()
+        pred_docking_scaled = predictions[1].flatten()
+
+        # Batch inverse transform
+        pred_activity_log1p = y_scaler1.inverse_transform(pred_activity_scaled.reshape(-1, 1)).flatten()
         pred_activity = np.expm1(pred_activity_log1p)
-        pred_docking = y_scaler2.inverse_transform([[pred_docking_scaled]])[0, 0]
-        
-        # Store result
-        res = {
-            'smiles': lig_smiles,
-            'mutation': mutant_name,
-            'predicted_activity': pred_activity,
-            'predicted_docking': pred_docking
-        }
-        
-        if has_ground_truth:
-            res['actual_activity'] = pred_row['standard value']
-            res['actual_docking'] = pred_row['dock']
-            
-        # Keep other columns (including tkd for evaluation)
-        for col in df_pred.columns:
-            if col not in res and col not in ['smiles', 'standard value', 'dock']:
-                 res[col] = pred_row[col]
-                 
-        results.append(res)
-        
-        if (pred_idx + 1) % 10 == 0:
-            print(f"  Processed {pred_idx + 1}/{len(df_pred)} samples")
-    
+        pred_docking = y_scaler2.inverse_transform(pred_docking_scaled.reshape(-1, 1)).flatten()
+
+        # Store results
+        for i, (orig_idx, row, _, _) in enumerate(valid_rows):
+            res = {
+                'smiles': row['smiles'],
+                'mutation': mutation_name,
+                'predicted_activity': pred_activity[i],
+                'predicted_docking': pred_docking[i]
+            }
+
+            if has_ground_truth:
+                res['actual_activity'] = row['standard value']
+                res['actual_docking'] = row['dock']
+
+            for col in df_pred.columns:
+                if col not in res and col not in ['smiles', 'standard value', 'dock']:
+                    res[col] = row[col]
+
+            results.append(res)
+
+        print(f"    Predicted {n_valid} compounds for {mutation_name}")
+
     if not results:
         print("Error: No valid samples found to predict.")
         return None
-        
+
     df_results = pd.DataFrame(results)
-    
+
     # Save output
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        
+
     output_path = os.path.join(output_dir, 'predictions_adv_physchem5f2.csv')
     df_results.to_csv(output_path, index=False)
     print(f"\n✓ Predictions saved to: {output_path}")
-    
+
+    print(f"\n--- Feature Cache Stats ---")
+    print(f"  Disk cache hits:   {_cache_hits}")
+    print(f"  Disk cache misses: {_cache_misses}")
+    print(f"  Cache directory:   {os.path.abspath(_CACHE_DIR)}")
+
     # Evaluation (if ground truth exists)
     if has_ground_truth and len(df_results) > 0:
         evaluate_and_plot(df_results, output_dir, 'adv_physchem5f2')
-        
+
     return df_results
 
 

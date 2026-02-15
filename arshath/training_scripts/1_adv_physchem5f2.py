@@ -18,12 +18,49 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from rdkit import RDLogger
 
 import os
+import hashlib
+import pickle
 
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
 # === Configuration ===
 RDLogger.DisableLog('rdApp.*')
 np.random.seed(42)
+
+# === Disk-backed Feature Cache ===
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', '.feature_cache')
+_cache_hits = 0
+_cache_misses = 0
+
+def _get_cache_path(smiles):
+    """Return the cache file path for a given SMILES string."""
+    md5 = hashlib.md5(smiles.encode('utf-8')).hexdigest()
+    return os.path.join(_CACHE_DIR, f'{md5}.pkl')
+
+def _load_cached_features(smiles):
+    """Load cached inter/intra features from disk. Returns (inter, intra) or None."""
+    global _cache_hits, _cache_misses
+    path = _get_cache_path(smiles)
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            _cache_hits += 1
+            return data['inter'], data['intra']
+        except Exception:
+            pass
+    _cache_misses += 1
+    return None
+
+def _save_cached_features(smiles, inter, intra):
+    """Save computed inter/intra features to disk cache."""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    path = _get_cache_path(smiles)
+    try:
+        with open(path, 'wb') as f:
+            pickle.dump({'inter': inter, 'intra': intra}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
 # Logger configuration
 logger.remove()
@@ -164,13 +201,102 @@ def safe_divide(numerator, denominator, default=0.0):
 
 #Priority of descriptors to capture intermolecular features between ligand and mutation
 
+def _generate_lig_features(smiles):
+    """Compute both inter and intra features with a single MolFromSmiles call.
+    Checks disk cache first; writes to disk cache on miss.
+    Returns (inter_array, intra_array) or (None, None)."""
+    cached = _load_cached_features(smiles)
+    if cached is not None:
+        return cached
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None, None
+
+    try:
+        # --- inter features (25) ---
+        inter = []
+        inter.append(Lipinski.NumHDonors(mol))
+        inter.append(Lipinski.NumHAcceptors(mol))
+        inter.append(Lipinski.NHOHCount(mol))
+        inter.append(Lipinski.NOCount(mol))
+        inter.append(rdMolDescriptors.CalcNumHBD(mol))
+        inter.append(rdMolDescriptors.CalcNumHBA(mol))
+        max_pc = Descriptors.MaxPartialCharge(mol)
+        min_pc = Descriptors.MinPartialCharge(mol)
+        inter.append(max_pc)
+        inter.append(min_pc)
+        inter.append(Descriptors.MaxAbsPartialCharge(mol))
+        inter.append(max_pc - min_pc)
+        inter.append(Descriptors.MinAbsPartialCharge(mol))
+        inter.append(MolSurf.TPSA(mol))
+        inter.append(MolSurf.LabuteASA(mol))
+        inter.append(Crippen.MolMR(mol))
+        inter.append(Descriptors.MolWt(mol))
+        inter.append(Lipinski.HeavyAtomCount(mol))
+        inter.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+        inter.append(Crippen.MolLogP(mol))
+        inter.append(Descriptors.FractionCSP3(mol))
+        inter.append(Lipinski.NumAromaticRings(mol))
+        aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
+        inter.append(aromatic_atoms)
+        inter.append(Descriptors.NumAromaticCarbocycles(mol))
+        inter.append(Descriptors.NumAromaticHeterocycles(mol))
+        inter.append(Fragments.fr_halogen(mol))
+        inter.append(Lipinski.NumRotatableBonds(mol))
+        inter_arr = np.array(inter)
+
+        # --- intra features (30) ---
+        intra = []
+        num_bonds = mol.GetNumBonds()
+        intra.append(num_bonds)
+        single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
+        double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
+        triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
+        aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
+        intra.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
+        avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
+        intra.append(avg_bond_order)
+        intra.append(Lipinski.NumRotatableBonds(mol))
+        intra.append(Lipinski.RingCount(mol))
+        intra.append(Lipinski.NumAromaticRings(mol))
+        rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
+        fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
+        intra.append(fraction_rigid)
+        intra.append(Descriptors.NumAromaticCarbocycles(mol))
+        intra.append(Descriptors.NumAromaticHeterocycles(mol))
+        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
+        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
+        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
+        intra.extend([sp_carbons, sp2_carbons, sp3_carbons])
+        ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
+        avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
+        min_ring_size = min(ring_sizes) if ring_sizes else 0
+        intra.extend([avg_ring_size, min_ring_size])
+        three_member_rings = sum(1 for size in ring_sizes if size == 3)
+        four_member_rings = sum(1 for size in ring_sizes if size == 4)
+        intra.extend([three_member_rings, four_member_rings])
+        intra.append(GraphDescriptors.BertzCT(mol))
+        intra.append(GraphDescriptors.Kappa1(mol))
+        intra.append(GraphDescriptors.Kappa2(mol))
+        intra.append(GraphDescriptors.Kappa3(mol))
+        intra.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
+        intra.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
+        intra_arr = np.array(intra)
+
+        _save_cached_features(smiles, inter_arr, intra_arr)
+        return inter_arr, intra_arr
+
+    except Exception:
+        return None, None
+
 def generate_lig_inter_features(smiles): #Intermolecular Ligand, input smiles ligand, returns np array
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
-    
+
     features = []
-    
+
     try:
         #Hydrogen Bonding,
         features.append(Lipinski.NumHDonors(mol))
@@ -478,7 +604,7 @@ def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra):
     
     return lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra
 
-def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series):
+def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series, ligand_cache=None, mutation_cache=None):
     # logger.info("inside generate_hierarchical_features function")
     # logger.info(f"Lig smiles sample: {ligand_smiles_series}, Mut smiles sample: {mutation_smiles_series}")
     # logger.debug(f"Input type={type(mutation_smiles_series)}, length={len(mutation_smiles_series)}, shape={(mutation_smiles_series.shape if hasattr(mutation_smiles_series, 'shape') else 'N/A')}")
@@ -497,8 +623,10 @@ def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series)
     
     print("\nGenerating hierarchical features...")
 
-    ligand_cache = {}
-    mutation_cache = {}
+    if ligand_cache is None:
+        ligand_cache = {}
+    if mutation_cache is None:
+        mutation_cache = {}
     interaction_cache = {}
     
     for idx, (lig_smi, mut_smi) in enumerate(zip(ligand_smiles_series, mutation_smiles_series)):
@@ -514,17 +642,17 @@ def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series)
         if lig_smi in ligand_cache:
             lig_inter, lig_intra = ligand_cache[lig_smi]
         else:
-            lig_inter = generate_lig_inter_features(lig_smi)
-            lig_intra = generate_lig_intra_features(lig_smi)
-            ligand_cache[lig_smi] = (lig_inter, lig_intra)
+            lig_inter, lig_intra = _generate_lig_features(lig_smi)
+            if lig_inter is not None and lig_intra is not None:
+                ligand_cache[lig_smi] = (lig_inter, lig_intra)
 
         # [MODIFIED] Check/Update Cache for Mutation Features
         if mut_smi in mutation_cache:
             mut_inter, mut_intra = mutation_cache[mut_smi]
         else:
-            mut_inter = generate_mut_inter_features(mut_smi)
-            mut_intra = generate_mut_intra_features(mut_smi)
-            mutation_cache[mut_smi] = (mut_inter, mut_intra)
+            mut_inter, mut_intra = _generate_lig_features(mut_smi)
+            if mut_inter is not None and mut_intra is not None:
+                mutation_cache[mut_smi] = (mut_inter, mut_intra)
 
         if idx == 0:  # Only print for first sample
             print(f"lig_inter: {lig_inter}")
@@ -1204,13 +1332,16 @@ def main():
     
     all_feature_dicts = []
     all_valid_indices = []
-    
+
+    _persistent_ligand_cache = {}
+    _persistent_mutation_cache = {}
+
     for site_name, mut_smiles_series in mutation_sites:
         print(f"\n{'='*80}")
         print(f"Processing {site_name}")
         print(f"{'='*80}")
-        
-        feature_dict = generate_hierarchical_features(ligand_smiles_valid, mut_smiles_series)
+
+        feature_dict = generate_hierarchical_features(ligand_smiles_valid, mut_smiles_series, ligand_cache=_persistent_ligand_cache, mutation_cache=_persistent_mutation_cache)
         all_feature_dicts.append(feature_dict)
         all_valid_indices.append(set(feature_dict['valid_indices']))
         logger.info(f" Valid indices for {site_name}: {feature_dict['valid_indices']}")
@@ -1469,7 +1600,34 @@ def main():
     
     all_control_results = []
     all_drug_results = []
-    
+
+    # Pre-load all hierarchical models and create embedding models once
+    _loaded_hierarchical_models = {}
+    _loaded_embedding_models = {}
+    for site_name, _ in mutation_sites:
+        h_model = load_model(f'hierarchical_model_{site_name}.h5', compile=False)
+        h_model.compile(
+            optimizer=Adam(learning_rate=0.003),
+            loss={
+                'activity_output': 'mean_squared_error',
+                'docking_output': 'mean_squared_error'
+            },
+            loss_weights={
+                'activity_output': 1.0,
+                'docking_output': 0.7
+            },
+            metrics={
+                'activity_output': ['mae', 'mse'],
+                'docking_output': ['mae', 'mse']
+            }
+        )
+        _loaded_hierarchical_models[site_name] = h_model
+        _loaded_embedding_models[site_name] = Model(
+            inputs=h_model.inputs,
+            outputs=h_model.get_layer('embedding_output').output
+        )
+    print(f"Pre-loaded {len(_loaded_hierarchical_models)} hierarchical models and embedding models")
+
     for profile_idx, profile_row in unique_mutation_profiles.iterrows():
         mutation_name = profile_row['tkd']
         mut_site_smiles = [
@@ -1497,9 +1655,8 @@ def main():
         for site_idx, (site_name, _) in enumerate(mutation_sites):
             mut_smi_site = mut_site_smiles[site_idx]
             
-            mut_inter = generate_mut_inter_features(mut_smi_site)
-            mut_intra = generate_mut_intra_features(mut_smi_site)
-            
+            mut_inter, mut_intra = _generate_lig_features(mut_smi_site)
+
             if mut_inter is None or mut_intra is None:
                 print(f"    ERROR: Failed to generate mutation features for {site_name}")
                 continue  # Skip this site but continue with remaining sites
@@ -1512,8 +1669,7 @@ def main():
             site_control_valid_idx = []
             
             for idx, control_smi in enumerate(control_smiles):
-                lig_inter = generate_lig_inter_features(control_smi)
-                lig_intra = generate_lig_intra_features(control_smi)
+                lig_inter, lig_intra = _generate_lig_features(control_smi)
                 
                 if lig_inter is None or lig_intra is None:
                     continue
@@ -1557,32 +1713,8 @@ def main():
                 arr = np.array(control_features[key])
                 scaled_control[key] = scalers[key].transform(arr)
             
-            # Load model and extract embeddings
-            hierarchical_model = load_model(f'hierarchical_model_{site_name}.h5', compile=False)
+            embedding_model = _loaded_embedding_models[site_name]
 
-            # Recompile to ensure proper loading with multi-task setup
-            hierarchical_model.compile(
-                optimizer=Adam(learning_rate=0.003),
-                loss={
-                    'activity_output': 'mean_squared_error',
-                    'docking_output': 'mean_squared_error'
-                },
-                loss_weights={
-                    'activity_output': 1.0,
-                    'docking_output': 0.7
-                },
-                metrics={
-                    'activity_output': ['mae', 'mse'],
-                    'docking_output': ['mae', 'mse']
-                }
-            )
-
-            # Extract embeddings from 'embedding_output' layer (BEFORE the two output heads)
-            embedding_model = Model(
-                inputs=hierarchical_model.inputs,
-                outputs=hierarchical_model.get_layer('embedding_output').output
-            )
-            
             #collecting embeeding, not predicting activity
             site_embeddings = embedding_model.predict([
                 scaled_control['final_fp_interaction'],
@@ -1635,9 +1767,8 @@ def main():
         for site_idx, (site_name, _) in enumerate(mutation_sites):
             mut_smi_site = mut_site_smiles[site_idx]
             
-            mut_inter = generate_mut_inter_features(mut_smi_site)
-            mut_intra = generate_mut_intra_features(mut_smi_site)
-            
+            mut_inter, mut_intra = _generate_lig_features(mut_smi_site)
+
             if mut_inter is None or mut_intra is None:
                 continue  # Skip this site but continue with remaining sites
             
@@ -1649,8 +1780,7 @@ def main():
             site_drug_valid_idx = []
             
             for idx, drug_smi in enumerate(drug_smiles):
-                lig_inter = generate_lig_inter_features(drug_smi)
-                lig_intra = generate_lig_intra_features(drug_smi)
+                lig_inter, lig_intra = _generate_lig_features(drug_smi)
                 
                 if lig_inter is None or lig_intra is None:
                     continue
@@ -1692,31 +1822,8 @@ def main():
                 arr = np.array(drug_features[key])
                 scaled_drug[key] = scalers[key].transform(arr)
             
-            hierarchical_model = load_model(f'hierarchical_model_{site_name}.h5', compile=False)
+            embedding_model = _loaded_embedding_models[site_name]
 
-            # Recompile to ensure proper loading with multi-task setup
-            hierarchical_model.compile(
-                optimizer=Adam(learning_rate=0.003),
-                loss={
-                    'activity_output': 'mean_squared_error',
-                    'docking_output': 'mean_squared_error'
-                },
-                loss_weights={
-                    'activity_output': 1.0,
-                    'docking_output': 0.7
-                },
-                metrics={
-                    'activity_output': ['mae', 'mse'],
-                    'docking_output': ['mae', 'mse']
-                }
-            )
-            
-            # Extract embeddings from 'embedding_output' layer (BEFORE the two output heads)
-            embedding_model = Model(
-                inputs=hierarchical_model.inputs,
-                outputs=hierarchical_model.get_layer('embedding_output').output
-            )
-            
             site_embeddings = embedding_model.predict([
                 scaled_drug['final_fp_interaction'],
                 scaled_drug['lig_mut_mix_inter_intra'],
@@ -1840,6 +1947,11 @@ def main():
     print("âœ“ Drug predictions: drug_predictions_rnn.csv")
     print("âœ“ Training plot: rnn_training_history.png")
     print("="*80)
+
+    print(f"\n--- Feature Cache Stats ---")
+    print(f"  Disk cache hits:   {_cache_hits}")
+    print(f"  Disk cache misses: {_cache_misses}")
+    print(f"  Cache directory:   {os.path.abspath(_CACHE_DIR)}")
 
 
 if __name__ == "__main__":
