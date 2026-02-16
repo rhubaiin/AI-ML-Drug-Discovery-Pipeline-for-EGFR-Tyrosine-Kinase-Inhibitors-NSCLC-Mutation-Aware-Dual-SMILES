@@ -1092,9 +1092,18 @@ def main(output_dir='.', train_data=None, control_data=None, drug_data=None):
 
     # === Load Data ===
     print("\nLoading datasets...")
-    df_train = pd.read_csv(train_data)
-    df_control = pd.read_csv(control_data)
-    df_drugs = pd.read_csv(drug_data)
+    try:
+        df_train = pd.read_csv(train_data)
+    except UnicodeDecodeError:
+        df_train = pd.read_csv(train_data, encoding='latin-1')
+    try:
+        df_control = pd.read_csv(control_data)
+    except UnicodeDecodeError:
+        df_control = pd.read_csv(control_data, encoding='latin-1')
+    try:
+        df_drugs = pd.read_csv(drug_data)
+    except UnicodeDecodeError:
+        df_drugs = pd.read_csv(drug_data, encoding='latin-1')
 
     df_train.columns = df_train.columns.str.strip()
 

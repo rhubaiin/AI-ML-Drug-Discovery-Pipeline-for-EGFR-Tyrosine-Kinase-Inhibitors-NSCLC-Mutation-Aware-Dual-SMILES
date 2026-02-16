@@ -43,7 +43,7 @@ MODELS = {
     2: {
         'name': 'kan_bspline',
         'train': 'training_scripts/2_adv_physchem_KAN3_b_spline1a.py',
-        'infer': None,
+        'infer': 'inference_scripts/2_predict_adv_physchem_KAN_bspline.py',
         'default_train_csv': 'df_3_shuffled.csv',
     },
     3: {
@@ -55,13 +55,13 @@ MODELS = {
     4: {
         'name': 'chembert_crossattention',
         'train': 'training_scripts/4_adv_physchem_chemerta_crossattention.py',
-        'infer': None,
+        'infer': 'inference_scripts/4_predict_adv_physchem_chembert_crossattention.py',
         'default_train_csv': 'df_3_shuffled.csv',
     },
     5: {
         'name': 'gnn',
         'train': 'training_scripts/5_adv_physchem_gnn.py',
-        'infer': None,
+        'infer': 'inference_scripts/5_predict_adv_physchem_gnn.py',
         'default_train_csv': 'df_3_shuffled.csv',
     },
 }

@@ -976,9 +976,18 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
 
     # Load datasets
     print("\nLoading datasets...")
-    df_train = pd.read_csv(train_data)
-    df_control = pd.read_csv(control_data)
-    df_drugs = pd.read_csv(drug_data)
+    try:
+        df_train = pd.read_csv(train_data)
+    except UnicodeDecodeError:
+        df_train = pd.read_csv(train_data, encoding='latin-1')
+    try:
+        df_control = pd.read_csv(control_data)
+    except UnicodeDecodeError:
+        df_control = pd.read_csv(control_data, encoding='latin-1')
+    try:
+        df_drugs = pd.read_csv(drug_data)
+    except UnicodeDecodeError:
+        df_drugs = pd.read_csv(drug_data, encoding='latin-1')
     
     df_train.columns = df_train.columns.str.strip()
     
@@ -1193,7 +1202,15 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
         pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
     with open(os.path.join(output_dir, 'gnn_embedding_scalers.pkl'), 'wb') as f:
         pickle.dump(all_gnn_scalers, f)
-    
+
+    # Save mutation profiles for inference
+    profile_cols = ['smiles_full_egfr', 'smiles 718_862_atp_pocket', 'smiles_p_loop',
+                    'smiles_c_helix', 'smiles_l858r_a_loop_dfg_motif',
+                    'smiles_catalytic_hrd_motif', 'tkd']
+    unique_profiles = df_train_valid[profile_cols].drop_duplicates(subset=['tkd']).reset_index(drop=True)
+    unique_profiles.to_csv(os.path.join(output_dir, 'mutation_profiles.csv'), index=False)
+    print(f"Saved mutation_profiles.csv ({len(unique_profiles)} profiles)")
+
     # Save training plot
     print("\nSaving training plot...")
     try:
