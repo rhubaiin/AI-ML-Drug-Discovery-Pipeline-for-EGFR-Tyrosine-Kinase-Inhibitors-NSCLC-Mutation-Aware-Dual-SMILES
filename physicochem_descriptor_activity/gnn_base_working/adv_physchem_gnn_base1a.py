@@ -5,7 +5,23 @@ import pickle
 import numpy as np
 import pandas as pd
 from loguru import logger
-
+import os
+import sys
+import pickle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from scipy.stats import pearsonr
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Input, Concatenate, Multiply, LSTM, GRU, Bidirectional, LeakyReLU
+from tensorflow.keras.optimizers import Adam # Needed for recompile
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Crippen, Lipinski, MolSurf, GraphDescriptors, Fragments
+from rdkit.Chem import AllChem, rdMolDescriptors
+from rdkit import DataStructs
+from numpy.linalg import norm
+from rdkit import RDLogger
 # TensorFlow/Keras imports
 import tensorflow as tf
 
@@ -353,184 +369,319 @@ def safe_divide(numerator, denominator, default=0.0):
         return numerator / denominator if denominator != 0 else default
     return np.where(denominator != 0, numerator / denominator, default)
 
-
-def generate_lig_inter_features(smiles):
+def generate_lig_inter_features(smiles): #Intermolecular Ligand, input smiles ligand, returns np array
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
+    
     features = []
+    
     try:
+        #Hydrogen Bonding,
         features.append(Lipinski.NumHDonors(mol))
         features.append(Lipinski.NumHAcceptors(mol))
         features.append(Lipinski.NHOHCount(mol))
         features.append(Lipinski.NOCount(mol))
-        features.append(rdMolDescriptors.CalcNumHBD(mol))
-        features.append(rdMolDescriptors.CalcNumHBA(mol))
-        features.append(Descriptors.MaxPartialCharge(mol))
-        features.append(Descriptors.MinPartialCharge(mol))
-        features.append(Descriptors.MaxAbsPartialCharge(mol))
-        features.append(Descriptors.MaxPartialCharge(mol) - Descriptors.MinPartialCharge(mol))
+        features.append(rdMolDescriptors.CalcNumHBD(mol)) #includes N, O, and S (manual edit)
+        features.append(rdMolDescriptors.CalcNumHBA(mol)) #includes N, O, and S (manual edit)
+        
+        #Electrostatic bonding
+        #Partial charge = the small positive or negative charge assigned to each atom due to unequal sharing of electrons in bonds (like in polar bond
+        features.append(Descriptors.MaxPartialCharge(mol)) #highest partial charge among all atoms in the molecule (most positive atom), (likely electrophilic)
+        features.append(Descriptors.MinPartialCharge(mol)) #highest partial charge among all atoms in the molecule (most negative atom), (likely nucleophilic)
+        features.append(Descriptors.MaxAbsPartialCharge(mol)) #largest absolute value of partial charge among all atom, strongest charge polarization within the molecule
+        features.append(Descriptors.MaxPartialCharge(mol) - Descriptors.MinPartialCharge(mol)) #difference between most positive and most negative atoms), larger values mean stronger polarity within the molecule.
         features.append(Descriptors.MinAbsPartialCharge(mol))
-        features.append(MolSurf.TPSA(mol))
-        features.append(MolSurf.LabuteASA(mol))
-        features.append(Crippen.MolMR(mol))
-        features.append(Descriptors.MolWt(mol))
+        
+        #Polar surface
+        features.append(MolSurf.TPSA(mol))#The sum of the surface areas of all polar atoms (mostly oxygen and nitrogen) and their attached hydrogens.High TPSA â†’ more polar, less membrane permeable, more soluble, Low TPSA â†’ less polar, more membrane permeable (good for oral drugs)
+        
+        features.append(MolSurf.LabuteASA(mol))#An approximation of the total solvent-accessible surface area (SASA) of the molecule, calculated using Labuteâ€™s algorithm. #Reflects molecular size and hydrophobic surface exposure
+        #Aiâ€‹=Siâ€‹â‹…Piâ€‹, S = 4Ï€r^2i , Piâ€‹=1âˆ’jâˆâ€‹(1âˆ’fij
+        # S=total spherical surface area of atom , Pi=atomic solvation parameter, fij=fraction of atom i's surface area in contact with atom j
+
+        features.append(Crippen.MolMR(mol))#The Ghose-Crippen formula is an atom-contribution method used to estimate the octanol-water partition coefficient (log P) and molar refractivity (MR) of a molecule.
+        #Molar refractivity, a measure of the polarizability of the molecule
+        
+        #Size & Rigidity  (#May overlap with others)
+        features.append(Descriptors.MolWt(mol)) #molecular weight
         features.append(Lipinski.HeavyAtomCount(mol))
         features.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+        
         features.append(Crippen.MolLogP(mol))
-        features.append(Descriptors.FractionCSP3(mol))
+        features.append(Descriptors.FractionCSP3(mol)) # fraction of SP3 hybridised carbons
         features.append(Lipinski.NumAromaticRings(mol))
         aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
         features.append(aromatic_atoms)
+        
+        # Pi-Pi stacking 
         features.append(Descriptors.NumAromaticCarbocycles(mol))
         features.append(Descriptors.NumAromaticHeterocycles(mol))
+
+        #Halogen
         features.append(Fragments.fr_halogen(mol))
+
+        #Flexibility
         features.append(Lipinski.NumRotatableBonds(mol))
+
         return np.array(features)
+        
     except Exception as e:
-        logger.warning(f"Error in lig_inter: {e}")
+        print(f"Error in lig_inter: {str(e)}")
         return None
 
 
-def generate_mut_inter_features(smiles):
+def generate_mut_inter_features(smiles): #Intermolecular Mutation, input smiles mutation, returns np array
     return generate_lig_inter_features(smiles)
 
 
-def generate_lig_intra_features(smiles):
+#Subsequent priority of descriptors to capture features from intramolecular forces 
+def generate_lig_intra_features(smiles): #Intramolecular Ligand
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
+    
     features = []
+    
     try:
+        #Covalent bond
         num_bonds = mol.GetNumBonds()
         features.append(num_bonds)
+        
+        #higher order bonds favours intramolecular forces within molecule, bond order indicates strength of bond
         single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
         double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
         triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
         aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
         features.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
+        
         avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
         features.append(avg_bond_order)
+        
+        #Rigidity (May Overlap), flexibility indicates less intramolecular forces within molecule
         features.append(Lipinski.NumRotatableBonds(mol))
         features.append(Lipinski.RingCount(mol))
         features.append(Lipinski.NumAromaticRings(mol))
+        
         rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
         fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
         features.append(fraction_rigid)
+        
+        # Pi-Pi bonding 
         features.append(Descriptors.NumAromaticCarbocycles(mol))
         features.append(Descriptors.NumAromaticHeterocycles(mol))
-        sp2 = sum(1 for a in mol.GetAtoms() if a.GetHybridization() == Chem.HybridizationType.SP2)
-        sp3 = sum(1 for a in mol.GetAtoms() if a.GetHybridization() == Chem.HybridizationType.SP3)
-        sp = sum(1 for a in mol.GetAtoms() if a.GetHybridization() == Chem.HybridizationType.SP)
-        features.extend([sp, sp2, sp3])
+        
+        #Hybridization (May Overlap), branching indicates less intramolecular forces within molecule
+        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
+        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
+        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
+        features.extend([sp_carbons, sp2_carbons, sp3_carbons])
+        
+        #Ring strain
         ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
         avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
         min_ring_size = min(ring_sizes) if ring_sizes else 0
         features.extend([avg_ring_size, min_ring_size])
-        three_member = sum(1 for s in ring_sizes if s == 3)
-        four_member = sum(1 for s in ring_sizes if s == 4)
-        features.extend([three_member, four_member])
+        
+        three_member_rings = sum(1 for size in ring_sizes if size == 3)
+        four_member_rings = sum(1 for size in ring_sizes if size == 4)
+        features.extend([three_member_rings, four_member_rings])
+        
+        #Complexity
         features.append(GraphDescriptors.BertzCT(mol))
         features.append(GraphDescriptors.Kappa1(mol))
         features.append(GraphDescriptors.Kappa2(mol))
         features.append(GraphDescriptors.Kappa3(mol))
         features.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
         features.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
+        
         return np.array(features)
+        
     except Exception as e:
-        logger.warning(f"Error in lig_intra: {e}")
+        print(f"Error in lig_intra: {str(e)}")
         return None
 
 
-def generate_mut_intra_features(smiles):
+def generate_mut_intra_features(smiles): # Intramolecular Mutation
     return generate_lig_intra_features(smiles)
 
-
-def calculate_similarity_metrics(vec1, vec2):
-    norm1, norm2 = norm(vec1), norm(vec2)
+def calculate_similarity_metrics(vec1, vec2): #input np arrays, returns a dict with math metrics
+    # 1. Calculate Cosine Similarity with safety check
+    norm1 = norm(vec1)
+    norm2 = norm(vec2)
+    
     if norm1 == 0 or norm2 == 0:
-        return {'cosine_similarity': 0.0, 'sine_dissimilarity': 0.0, 'dot_product': 0.0}
+        # If either vector has zero norm, return default values
+        return {
+            'cosine_similarity': 0.0,
+            'sine_dissimilarity': 0.0,
+            'dot_product': 0.0
+        }
+    
     cosine_sim = np.dot(vec1, vec2) / (norm1 * norm2)
-    sine_of_angle = np.sqrt(max(0, 1 - cosine_sim**2))
-    return {'cosine_similarity': cosine_sim, 'sine_dissimilarity': sine_of_angle, 
-            'dot_product': np.dot(vec1, vec2)}
+    sine_of_angle = np.sqrt(1 - cosine_sim**2)
+
+    #logger.info(f"Cosine Similarity: {cosine_sim}, Sine dssimilarity: {sine_of_angle}, Dot Product: {np.dot(vec1, vec2)}")
+    
+    return {
+        'cosine_similarity': cosine_sim,
+        'sine_dissimilarity': sine_of_angle,
+        'dot_product': np.dot(vec1, vec2)
+    }
 
 
-def calculate_fp_metrics(smiles1, smiles2):
-    mol1, mol2 = Chem.MolFromSmiles(smiles1), Chem.MolFromSmiles(smiles2)
+def calculate_fp_metrics(smiles1, smiles2): #input smiles, returns dict with rdkit datastructs similarity
+    mol1 = Chem.MolFromSmiles(smiles1)
+    mol2 = Chem.MolFromSmiles(smiles2)
+    
     if mol1 is None or mol2 is None:
         return {'dice_sim': 0.0, 'tanimato': 0.0}
+    
     fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, 2, nBits=2048)
     fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, 2, nBits=2048)
-    return {'dice_sim': DataStructs.DiceSimilarity(fp1, fp2), 
-            'tanimato': DataStructs.TanimotoSimilarity(fp1, fp2)}
+    
+    dice_sim = DataStructs.DiceSimilarity(fp1, fp2)
+    tanimato = DataStructs.TanimotoSimilarity(fp1, fp2)
+
+    #logger.info(f"Dice Similarity: {dice_sim}, Tanimoto Similarity: {tanimato}")
+
+    
+    return {
+        'dice_sim': dice_sim,
+        'tanimato': tanimato,
+    }
 
 
-def generate_inter_interaction_features(lig_inter, mut_inter):
+def generate_inter_interaction_features(lig_inter, mut_inter): #similarity on intermolecular interactions ligand and mutation
+    features = []
     metrics = calculate_similarity_metrics(lig_inter, mut_inter)
-    return np.array([metrics['cosine_similarity'], metrics['sine_dissimilarity']])
+    
+    features.append(metrics['cosine_similarity'])
+    features.append(metrics['sine_dissimilarity'])
+    
+    return np.array(features)
 
 
-def generate_intra_interaction_features(lig_intra, mut_intra):
+def generate_intra_interaction_features(lig_intra, mut_intra): #similarity on intramolecular interactions ligand and mutation
+    features = []
     metrics = calculate_similarity_metrics(lig_intra, mut_intra)
-    return np.array([metrics['cosine_similarity'], metrics['sine_dissimilarity']])
+    
+    features.append(metrics['cosine_similarity'])
+    features.append(metrics['sine_dissimilarity'])
+    
+    return np.array(features)
 
 
-def generate_final_interaction_features(lig_smiles, mut_smiles):
-    fp_metrics = calculate_fp_metrics(lig_smiles, mut_smiles)
-    return np.array([fp_metrics['dice_sim'], fp_metrics['tanimato']])
+def generate_final_interaction_features(lig_smiles, mut_smiles): # fingerprints, morgan fingerprints dominate
+    features = []
+    
+    fp_inter_metrics = calculate_fp_metrics(lig_smiles, mut_smiles)
+    features.extend([fp_inter_metrics['dice_sim'], fp_inter_metrics['tanimato']])
+    
+    return np.array(features)
 
 
-def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra):
+def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra): 
+    """Generate custom intermolecular and intramolecular features with safe division"""
     lig_mut_inter = []
     lig_mut_intra = []
-    lig_mut_mix = []
+    lig_mut_mix_inter_intra = []
     
-    # H-bonding features
-    lig_mut_inter.append(safe_divide(lig_inter[0] * mut_inter[1], mut_inter[0]))
-    lig_mut_inter.append(safe_divide(lig_inter[4] * mut_inter[5], mut_inter[4]))
-    lig_mut_mix.append(safe_divide(safe_divide(lig_inter[0]*mut_inter[1], mut_inter[0]), mut_intra[21]))
-    lig_mut_inter.append(safe_divide(lig_inter[0]*mut_inter[1], lig_inter[1]) + 
-                         safe_divide(lig_inter[1]*mut_inter[0], mut_inter[1]))
-    lig_mut_inter.append(safe_divide(lig_inter[4]*mut_inter[5], lig_inter[4]) + 
-                         safe_divide(lig_inter[5]*mut_inter[4], mut_inter[5]))
-    lig_mut_inter.append(safe_divide(lig_inter[0], lig_inter[1]) + 
-                         safe_divide(mut_inter[1], mut_inter[0]))
-    lig_mut_inter.append(safe_divide(lig_inter[4], lig_inter[5]) + 
-                         safe_divide(mut_inter[5], mut_inter[4]))
+    # H attraction ligand , H = lig_hbd . mut_hba / mut_hbd 
+    # (#assumption: ligand moves to mut (mut is fixed position), lig hbd and mut hba attracts ligand), 
+    # mut hbd repels favouring intra bond within mut, ignoring intra bond repelling from ligand
+    H_linear_lipinski = safe_divide(lig_inter[0] * mut_inter[1], mut_inter[0], default=0.0)
+    lig_mut_inter.append(H_linear_lipinski)
     
-    # Electrostatic features
-    lig_mut_mix.append(safe_divide(lig_inter[6], lig_intra[14]) * safe_divide(mut_inter[7], mut_intra[14]))
-    lig_mut_mix.append(safe_divide(lig_inter[7], lig_intra[14]) * safe_divide(mut_inter[6], mut_intra[14]))
-    c_l1 = safe_divide(lig_inter[6], lig_intra[14]) * safe_divide(mut_inter[7], mut_intra[14])
-    c_l2 = safe_divide(lig_inter[7], lig_intra[14]) * safe_divide(mut_inter[6], mut_intra[14])
-    lig_mut_mix.append(c_l1**2 + c_l2**2)
+    H_linear_total = safe_divide(lig_inter[4] * mut_inter[5], mut_inter[4], default=0.0)
+    lig_mut_inter.append(H_linear_total)
     
-    lig_mut_inter.append((lig_inter[6] - mut_inter[7]) - (mut_inter[6] - lig_inter[7]))
-    lig_mut_inter.append(lig_inter[11] - mut_inter[11])
-    lig_mut_inter.append(lig_inter[17] - mut_inter[17])
-    lig_mut_inter.append(safe_divide(lig_inter[11]*mut_inter[11], lig_inter[17]*mut_inter[17]))
+    # H attraction ligand , H = lig_hbd . mut_hba / mut_hbd with weighted mut bond path (Kappa)
+    # (#assumption: ligand moves to mut (mut is fixed position), lig hbd and mut hba attracts ligand), 
+    # mut hbd repels favouring intra bond within mut
+    H_path = safe_divide(safe_divide(lig_inter[0] * mut_inter[1], mut_inter[0], default=0.0), mut_intra[21], default=0.0)
+    lig_mut_mix_inter_intra.append(H_path)
     
-    # Pi-pi stacking
-    lig_mut_mix.append(safe_divide(lig_inter[21]+lig_inter[22]+mut_inter[21]+mut_inter[22], 
-                                   lig_intra[15]+mut_intra[15]))
-    lig_mut_mix.append(safe_divide(lig_inter[21]+lig_inter[22]+mut_inter[21]+mut_inter[22], 
-                                   lig_intra[22]+mut_intra[22]))
+    # Streght H bond in intermolecular lig to mut minus mut intra bond within mut Lig(x1,y1) Mut(x2,y2)
+    # total attraction H_stregth , Lig(x1y1) Mut(x2,y2) , (lig_x1 * mut_y2 / lig_x2) + (lig_x2 * mut_y1 / mut_y2)
+    # inter bond attarct x1y2 , intra bond forming assumed as repelled, x1/y1 , assumed no repelling inter H bonds
+    H_strength = safe_divide(lig_inter[0] * mut_inter[1], lig_inter[1], default=0.0) + safe_divide(lig_inter[1] * mut_inter[0], mut_inter[1], default=0.0)
+    lig_mut_inter.append(H_strength)
     
-    # Bond rigidity
-    bond_rigid = (safe_divide(lig_intra[2]+lig_intra[3]+lig_intra[4], lig_intra[0]) + 
-                  safe_divide(mut_intra[2]+mut_intra[3]+mut_intra[4], mut_intra[0]))
-    bond_single = safe_divide(lig_intra[1], lig_intra[0]) + safe_divide(mut_intra[1], mut_intra[0])
-    lig_mut_intra.append((bond_single - bond_rigid)**2)
+    H_strength_total = safe_divide(lig_inter[4] * mut_inter[5], lig_inter[4], default=0.0) + safe_divide(lig_inter[5] * mut_inter[4], mut_inter[5], default=0.0)
+    lig_mut_inter.append(H_strength_total)
     
-    # Hybridization
-    hyb_lig = safe_divide(lig_intra[12]+lig_intra[13], lig_intra[14]+lig_intra[12]+lig_intra[13])
-    hyb_mut = safe_divide(mut_intra[12]+mut_intra[13], mut_intra[14]+mut_intra[12]+mut_intra[13])
-    lig_mut_intra.append((hyb_mut - hyb_lig)**2)
-    lig_mut_intra.append(safe_divide(lig_intra[21], mut_intra[21]))
+    # Lig donating stregght + Mut accepting Stregth , ligand movving to mut
+    H_frac_lipinski = safe_divide(lig_inter[0], lig_inter[1], default=0.0) + safe_divide(mut_inter[1], mut_inter[0], default=0.0)
+    lig_mut_inter.append(H_frac_lipinski)
     
-    return lig_mut_inter, lig_mut_intra, lig_mut_mix
+    H_frac_total = safe_divide(lig_inter[4], lig_inter[5], default=0.0) + safe_divide(mut_inter[5], mut_inter[4], default=0.0)
+    lig_mut_inter.append(H_frac_total)
+    
 
+    #using max positive and max negative charge, and length and size is simple number of bonds  (q1q2/r2)
+    # Attraction opp site charge lig(q1/r1) * mut(q2/r2), q1 is max positive and q2 is max neg
+    # size options include: Molwt, number of bonds, Euclidean distance . radius of gyration (rdMolDescriptors.CalcRadiusOfGyration(mol))
+
+    # Assumption: non moving mutant, only ligand moving to mutant through attraction charge Only, (taking max abs postive and min ngeative)
+    # only Attraction intermolecular forces, assuming no intrabond attraction within molecule. Assumed no repelling intermolecule same charge
+    #A c_linear q1 pos to q2 neg / r1r2 
+    # B c_linear q1 neg to q2 pos/r1r2
+    #total & ratio
+
+    # assuming got positive charges ligand and negative charge mut with weighted size molwt
+    c_linear1_size1 = safe_divide(lig_inter[6], lig_intra[14], default=0.0) * safe_divide(mut_inter[7], mut_intra[14], default=0.0)
+    lig_mut_mix_inter_intra.append(c_linear1_size1)
+    
+    c_linear2_size1 = safe_divide(lig_inter[7], lig_intra[14], default=0.0) * safe_divide(mut_inter[6], mut_intra[14], default=0.0)
+    lig_mut_mix_inter_intra.append(c_linear2_size1)
+    
+    c_total = (c_linear1_size1 ** 2) + (c_linear2_size1 ** 2) #bringing out magnitude of each attarction parts
+    lig_mut_mix_inter_intra.append(c_total)
+    
+    #difference between pos lig neg mut to neg mut pos lig
+    c_diff = ((lig_inter[6]) - (mut_inter[7])) - ((mut_inter[6]) - (lig_inter[7]))
+    lig_mut_inter.append(c_diff)
+    
+    #difference between pos lig neg mut to neg mut pos lig
+    c_tpsa_diff = lig_inter[11] - mut_inter[11]
+    lig_mut_inter.append(c_tpsa_diff)
+    
+    c_crip_logh = lig_inter[17] - mut_inter[17]
+    lig_mut_inter.append(c_crip_logh)
+    
+    frac_tpsa_logH = safe_divide(lig_inter[11] * mut_inter[11], lig_inter[17] * mut_inter[17], default=0.0)
+    lig_mut_inter.append(frac_tpsa_logH)
+    
+    #pi-pi stacking ratio
+    pi_pi_ratio1 = safe_divide(lig_inter[21] + lig_inter[22] + mut_inter[21] + mut_inter[22], lig_intra[15] + mut_intra[15], default=0.0)
+    lig_mut_mix_inter_intra.append(pi_pi_ratio1)
+    
+    pi_pi_ratio2 = safe_divide(lig_inter[21] + lig_inter[22] + mut_inter[21] + mut_inter[22], lig_intra[22] + mut_intra[22], default=0.0)
+    lig_mut_mix_inter_intra.append(pi_pi_ratio2)
+    
+    #Bringing out difference between a more rigid/loose ligand 
+
+    #double/triple bond ratio increasing
+    # bond rigid total double, triple n aromatic over total num of bonds (tighter intra lig and intra mut strength as a total)
+    # bond single (looser intra lig and intra mut strength)
+    bond_rigid = safe_divide(lig_intra[2] + lig_intra[3] + lig_intra[4], lig_intra[0], default=0.0) + safe_divide(mut_intra[2] + mut_intra[3] + mut_intra[4], mut_intra[0], default=0.0)
+    bond_single = safe_divide(lig_intra[1], lig_intra[0], default=0.0) + safe_divide(mut_intra[1], mut_intra[0], default=0.0)
+    bond_diff = (bond_single - bond_rigid) ** 2
+    lig_mut_intra.append(bond_diff)
+    
+    #spsp2/sp3 ratio
+    # fraction of spsp2/sp3 between ligand and mutant
+    # bigger difference indicate mutants more loose, ligands are same
+    hybridisation_lig = safe_divide(lig_intra[12] + lig_intra[13], lig_intra[14] + lig_intra[12] + lig_intra[13], default=0.0)
+    hybridisation_mut = safe_divide(mut_intra[12] + mut_intra[13], mut_intra[14] + mut_intra[12] + mut_intra[13], default=0.0)
+    hybridisation_diff = (hybridisation_mut - hybridisation_lig) ** 2
+    lig_mut_intra.append(hybridisation_diff)
+    
+    bertz_ratio = safe_divide(lig_intra[21], mut_intra[21], default=0.0)
+    lig_mut_intra.append(bertz_ratio)
+    
+    return lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra
 
 def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series):
     print('\nGenerating hierarchical features...')
@@ -839,7 +990,7 @@ def keras_main():
     # Load datasets
     script_dir = os.path.dirname(os.path.abspath(__file__))
     print("\nLoading datasets...")
-    df_train = pd.read_csv(os.path.join(script_dir, 'df_3_shuffled.csv'))
+    df_train = pd.read_csv(os.path.join(script_dir, 'test_df_3_shuffled.csv'))
     df_control = pd.read_csv(os.path.join(script_dir, 'egfr_tki_valid_cleaned.csv'))
     df_drugs = pd.read_csv(os.path.join(script_dir, 'drugs.csv'))
     
