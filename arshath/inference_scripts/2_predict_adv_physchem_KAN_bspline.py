@@ -880,7 +880,7 @@ def make_predictions(input_csv, model_dir='.', output_dir='.'):
     """
 
     print(f"Loading prediction data from: {input_csv}")
-    df_pred = pd.read_csv(input_csv)
+    df_pred = pd.read_csv(input_csv, encoding='latin-1')
 
     required_cols = ['smiles', 'tkd']
     if not all(col in df_pred.columns for col in required_cols):
