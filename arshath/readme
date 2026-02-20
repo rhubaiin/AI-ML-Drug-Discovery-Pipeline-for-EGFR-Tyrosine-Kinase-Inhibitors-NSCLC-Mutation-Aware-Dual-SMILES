@@ -1,5 +1,0 @@
-1. Train & Prediction csv are df_3_shuffled.csv and manual_egfr3_mini_dock_fixed.csv 
-2. All training scrtips start with adv 
-3. All prediction scripts start with predict
-4. Need help to run train script and respective prediction script (before running prediction script test on smaller csv test_egfr3.csv)
-5. To run twice, reversing training & prediction scripts 
