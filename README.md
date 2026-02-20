@@ -15,6 +15,8 @@
 
 *An end-to-end machine learning pipeline featuring **dual-SMILES physicochemical descriptor capture** from both ligand and mutation protein — closing the interaction loop to generate intermolecular, intramolecular, similarity, fingerprint, and custom relationship features from both sides. This enables higher-accuracy prediction of drug activity (IC50/EC50) and docking scores for EGFR tyrosine kinase inhibitors targeting resistant NSCLC mutations.*
 
+Special Thanks to Arshath for his ML Expertise and Experience thorught the entire project! 
+
 </div>
 
 ---
@@ -644,3 +646,4 @@ Each run produces: trained model weights (`.h5`), feature scalers (`.pkl`), trai
 *Built for accelerating 4th-generation EGFR-TKI drug discovery against resistant NSCLC mutations.*
 
 </div>
+
