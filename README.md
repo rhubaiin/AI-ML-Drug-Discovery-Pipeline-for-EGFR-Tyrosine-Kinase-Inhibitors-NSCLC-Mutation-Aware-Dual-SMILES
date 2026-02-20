@@ -21,6 +21,7 @@ Special Thanks to Arshath for his ML Expertise and Experience throughout the ent
 
 ---
 
+
 ## 📋 Table of Contents
 
 - [Overview](#overview)
@@ -48,7 +49,7 @@ Special Thanks to Arshath for his ML Expertise and Experience throughout the ent
 
 This project is a **drug discovery ML pipeline** for predicting **4th-generation EGFR inhibitor** activity against **Non-Small Cell Lung Cancer (NSCLC)**. It uses molecular data sourced from [ChEMBL](https://www.ebi.ac.uk/chembl/) to train neural networks that predict:
 
-1. **Activity** — IC50/EC50 values measuring how potent a drug is against specific EGFR mutations
+1. **Activity** — IC50 values measuring how potent a drug is against specific EGFR mutations
 2. **Docking Score** — how well a drug binds to the EGFR protein across mutation variants
 
 ### 🔑 Key Differentiator: End-to-End Dual-SMILES Feature Capture
@@ -646,6 +647,7 @@ Each run produces: trained model weights (`.h5`), feature scalers (`.pkl`), trai
 *Built for accelerating 4th-generation EGFR-TKI drug discovery against resistant NSCLC mutations.*
 
 </div>
+
 
 
 
