@@ -1032,6 +1032,19 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
 
 def keras_main(output_dir='.', train_data_path=None, control_data_path=None, drug_data_path=None):
     """Full training workflow with predictions on control and drug datasets."""
+    # Resolve all paths to absolute BEFORE chdir
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
+    if train_data_path is None:
+        train_data_path = os.path.join(data_dir, 'df_3_shuffled.csv')
+    if control_data_path is None:
+        control_data_path = os.path.join(data_dir, 'egfr_tki_valid_cleaned.csv')
+    if drug_data_path is None:
+        drug_data_path = os.path.join(data_dir, 'drugs.csv')
+    train_data_path = os.path.abspath(train_data_path)
+    control_data_path = os.path.abspath(control_data_path)
+    drug_data_path = os.path.abspath(drug_data_path)
+    output_dir = os.path.abspath(output_dir)
+
     os.makedirs(output_dir, exist_ok=True)
     os.chdir(output_dir)
 
@@ -1040,13 +1053,6 @@ def keras_main(output_dir='.', train_data_path=None, control_data_path=None, dru
     print("="*80)
 
     # Load datasets
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
-    if train_data_path is None:
-        train_data_path = os.path.join(data_dir, 'df_3_shuffled.csv')
-    if control_data_path is None:
-        control_data_path = os.path.join(data_dir, 'egfr_tki_valid_cleaned.csv')
-    if drug_data_path is None:
-        drug_data_path = os.path.join(data_dir, 'drugs.csv')
 
     print("\nLoading datasets...")
     df_train = pd.read_csv(train_data_path, encoding='latin-1')
@@ -1101,7 +1107,8 @@ def keras_main(output_dir='.', train_data_path=None, control_data_path=None, dru
     print("OK GINet model initialized")
     
 
-    pretrained_path = "checkpoints/molclr_pretrained.pth"
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    pretrained_path = os.path.join(_script_dir, '..', 'checkpoints', 'molclr_pretrained.pth')
     if os.path.exists(pretrained_path):
         logger.info(f"Loading MolCLR pre-trained weights from {pretrained_path}")
         checkpoint = torch.load(pretrained_path, map_location='cpu')

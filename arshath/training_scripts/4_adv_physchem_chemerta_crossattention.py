@@ -832,9 +832,7 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
 def keras_main(output_dir='.', train_data_path=None, control_data_path=None, drug_data_path=None):
     global unique_mutation_profiles  # needed by inference section
 
-    os.makedirs(output_dir, exist_ok=True)
-    os.chdir(output_dir)
-
+    # Resolve all paths to absolute BEFORE chdir
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
     if train_data_path is None:
         train_data_path = os.path.join(data_dir, 'df_3_shuffled.csv')
@@ -842,6 +840,13 @@ def keras_main(output_dir='.', train_data_path=None, control_data_path=None, dru
         control_data_path = os.path.join(data_dir, 'egfr_tki_valid_cleaned.csv')
     if drug_data_path is None:
         drug_data_path = os.path.join(data_dir, 'drugs.csv')
+    train_data_path = os.path.abspath(train_data_path)
+    control_data_path = os.path.abspath(control_data_path)
+    drug_data_path = os.path.abspath(drug_data_path)
+    output_dir = os.path.abspath(output_dir)
+
+    os.makedirs(output_dir, exist_ok=True)
+    os.chdir(output_dir)
 
     print("\nLoading datasets...")
     df_train   = pd.read_csv(train_data_path, encoding='latin-1')
