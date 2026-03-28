@@ -14,7 +14,7 @@ export MPLBACKEND=Agg
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-BASE=experiments
+BASE=experiments_v2
 DATA_A=data/manual_egfr3_mini_dock_fixed.csv
 DATA_B=data/df_3_shuffled.csv
 
@@ -24,18 +24,12 @@ echo "======================================"
 echo ""
 
 # ─────────────────────────────────────────
-# Step 1: Back up existing experiments
+# Step 1: Create experiments_v2 directory
 # ─────────────────────────────────────────
-echo "[Step 1/4] Backing up experiments/ → experiments_backup/"
+echo "[Step 1/4] Creating $BASE/ directory..."
 if [ -d "$BASE" ]; then
-    if [ -d "experiments_backup" ]; then
-        echo "  WARNING: experiments_backup/ already exists. Removing it first."
-        rm -rf experiments_backup
-    fi
-    mv "$BASE" experiments_backup
-    echo "  Done."
-else
-    echo "  No existing experiments/ directory to back up."
+    echo "  WARNING: $BASE/ already exists. Removing for fresh run."
+    rm -rf "$BASE"
 fi
 mkdir -p "$BASE"
 echo ""
@@ -57,7 +51,7 @@ echo "[Step 2/4] Training all 6 models on default datasets..."
 echo "  Model 0 → manual_egfr3_mini_dock_fixed.csv"
 echo "  Models 1-5 → df_3_shuffled.csv"
 echo ""
-python run_experiment.py --model all
+python run_experiment.py --model all --experiments_dir "$BASE"
 echo ""
 echo "  Default training complete."
 echo ""
@@ -68,11 +62,11 @@ echo ""
 echo "[Step 3/4] Training all 6 models on swapped datasets..."
 
 echo "  Model 0 → df_3_shuffled.csv"
-python run_experiment.py --model 0 --train_data "$DATA_B"
+python run_experiment.py --model 0 --train_data "$DATA_B" --experiments_dir "$BASE"
 echo ""
 
 echo "  Models 1-5 → manual_egfr3_mini_dock_fixed.csv"
-python run_experiment.py --model 1 2 3 4 5 --train_data "$DATA_A"
+python run_experiment.py --model 1 2 3 4 5 --train_data "$DATA_A" --experiments_dir "$BASE"
 echo ""
 echo "  Swapped training complete."
 echo ""
