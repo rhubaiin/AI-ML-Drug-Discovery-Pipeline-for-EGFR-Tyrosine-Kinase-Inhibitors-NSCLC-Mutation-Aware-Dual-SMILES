@@ -2,11 +2,26 @@
 import os
 import sys
 import pickle
-import hashlib
 import numpy as np
 import pandas as pd
 from loguru import logger
-
+import os
+import sys
+import pickle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from scipy.stats import pearsonr
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Input, Concatenate, Multiply, LSTM, GRU, Bidirectional, LeakyReLU
+from tensorflow.keras.optimizers import Adam # Needed for recompile
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Crippen, Lipinski, MolSurf, GraphDescriptors, Fragments
+from rdkit.Chem import AllChem, rdMolDescriptors
+from rdkit import DataStructs
+from numpy.linalg import norm
+from rdkit import RDLogger
 # TensorFlow/Keras imports
 import tensorflow as tf
 
@@ -62,44 +77,11 @@ from numpy.linalg import norm
 
 # Suppress RDKit warnings
 RDLogger.DisableLog('rdApp.*')
+
+os.environ['MPLBACKEND'] = 'Agg'
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 np.random.seed(42)
 torch.manual_seed(42)
-
-# === Disk-backed Feature Cache ===
-_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', '.feature_cache')
-_cache_hits = 0
-_cache_misses = 0
-
-def _get_cache_path(smiles):
-    """Return the cache file path for a given SMILES string."""
-    md5 = hashlib.md5(smiles.encode('utf-8')).hexdigest()
-    return os.path.join(_CACHE_DIR, f'{md5}.pkl')
-
-def _load_cached_features(smiles):
-    """Load cached inter/intra features from disk. Returns (inter, intra) or None."""
-    global _cache_hits, _cache_misses
-    path = _get_cache_path(smiles)
-    if os.path.exists(path):
-        try:
-            with open(path, 'rb') as f:
-                data = pickle.load(f)
-            _cache_hits += 1
-            return data['inter'], data['intra']
-        except Exception:
-            pass
-    _cache_misses += 1
-    return None
-
-def _save_cached_features(smiles, inter, intra):
-    """Save computed inter/intra features to disk cache."""
-    os.makedirs(_CACHE_DIR, exist_ok=True)
-    path = _get_cache_path(smiles)
-    try:
-        with open(path, 'wb') as f:
-            pickle.dump({'inter': inter, 'intra': intra}, f, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:
-        pass
 
 # Logger configuration
 
@@ -384,11 +366,41 @@ def get_gnn_embeddings(smiles_list, model, device, batch_size=32):
 # Feature Generation Functions (from adv_physchem5f2.py)
 # =============================================================================
 
-def safe_divide(numerator, denominator, default=0.0):
-    if isinstance(denominator, (int, float)):
-        return numerator / denominator if denominator != 0 else default
-    return np.where(denominator != 0, numerator / denominator, default)
+# === Disk-backed Feature Cache ===
+import hashlib
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', '.feature_cache')
+_cache_hits = 0
+_cache_misses = 0
 
+def _get_cache_path(smiles):
+    """Return the cache file path for a given SMILES string."""
+    md5 = hashlib.md5(smiles.encode('utf-8')).hexdigest()
+    return os.path.join(_CACHE_DIR, f'{md5}.pkl')
+
+def _load_cached_features(smiles):
+    """Load cached inter/intra features from disk. Returns (inter, intra) or None."""
+    global _cache_hits, _cache_misses
+    path = _get_cache_path(smiles)
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            _cache_hits += 1
+            return data['inter'], data['intra']
+        except Exception:
+            pass
+    _cache_misses += 1
+    return None
+
+def _save_cached_features(smiles, inter, intra):
+    """Save computed inter/intra features to disk cache."""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    path = _get_cache_path(smiles)
+    try:
+        with open(path, 'wb') as f:
+            pickle.dump({'inter': inter, 'intra': intra}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
 def _generate_lig_features(smiles):
     """Compute both inter and intra features with a single MolFromSmiles call.
@@ -397,273 +409,335 @@ def _generate_lig_features(smiles):
     cached = _load_cached_features(smiles)
     if cached is not None:
         return cached
+    inter = generate_lig_inter_features(smiles)
+    intra = generate_lig_intra_features(smiles)
+    if inter is not None and intra is not None:
+        _save_cached_features(smiles, inter, intra)
+    return inter, intra
 
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return None, None
 
-    try:
-        # --- inter features (25) ---
-        inter = []
-        inter.append(Lipinski.NumHDonors(mol))
-        inter.append(Lipinski.NumHAcceptors(mol))
-        inter.append(Lipinski.NHOHCount(mol))
-        inter.append(Lipinski.NOCount(mol))
-        inter.append(rdMolDescriptors.CalcNumHBD(mol))
-        inter.append(rdMolDescriptors.CalcNumHBA(mol))
-        max_pc = Descriptors.MaxPartialCharge(mol)
-        min_pc = Descriptors.MinPartialCharge(mol)
-        inter.append(max_pc)
-        inter.append(min_pc)
-        inter.append(Descriptors.MaxAbsPartialCharge(mol))
-        inter.append(max_pc - min_pc)
-        inter.append(Descriptors.MinAbsPartialCharge(mol))
-        inter.append(MolSurf.TPSA(mol))
-        inter.append(MolSurf.LabuteASA(mol))
-        inter.append(Crippen.MolMR(mol))
-        inter.append(Descriptors.MolWt(mol))
-        inter.append(Lipinski.HeavyAtomCount(mol))
-        inter.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
-        inter.append(Crippen.MolLogP(mol))
-        inter.append(Descriptors.FractionCSP3(mol))
-        inter.append(Lipinski.NumAromaticRings(mol))
-        aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
-        inter.append(aromatic_atoms)
-        inter.append(Descriptors.NumAromaticCarbocycles(mol))
-        inter.append(Descriptors.NumAromaticHeterocycles(mol))
-        inter.append(Fragments.fr_halogen(mol))
-        inter.append(Lipinski.NumRotatableBonds(mol))
-        inter_arr = np.array(inter)
+def safe_divide(numerator, denominator, default=0.0):
+    if isinstance(denominator, (int, float)):
+        return numerator / denominator if denominator != 0 else default
+    return np.where(denominator != 0, numerator / denominator, default)
 
-        # --- intra features (30) ---
-        intra = []
-        num_bonds = mol.GetNumBonds()
-        intra.append(num_bonds)
-        single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
-        double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
-        triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
-        aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
-        intra.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
-        avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
-        intra.append(avg_bond_order)
-        intra.append(Lipinski.NumRotatableBonds(mol))
-        intra.append(Lipinski.RingCount(mol))
-        intra.append(Lipinski.NumAromaticRings(mol))
-        rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
-        fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
-        intra.append(fraction_rigid)
-        intra.append(Descriptors.NumAromaticCarbocycles(mol))
-        intra.append(Descriptors.NumAromaticHeterocycles(mol))
-        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
-        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
-        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
-        intra.extend([sp_carbons, sp2_carbons, sp3_carbons])
-        ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
-        avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
-        min_ring_size = min(ring_sizes) if ring_sizes else 0
-        intra.extend([avg_ring_size, min_ring_size])
-        three_member_rings = sum(1 for size in ring_sizes if size == 3)
-        four_member_rings = sum(1 for size in ring_sizes if size == 4)
-        intra.extend([three_member_rings, four_member_rings])
-        intra.append(GraphDescriptors.BertzCT(mol))
-        intra.append(GraphDescriptors.Kappa1(mol))
-        intra.append(GraphDescriptors.Kappa2(mol))
-        intra.append(GraphDescriptors.Kappa3(mol))
-        intra.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
-        intra.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
-        intra_arr = np.array(intra)
-
-        _save_cached_features(smiles, inter_arr, intra_arr)
-        return inter_arr, intra_arr
-
-    except Exception:
-        return None, None
-
-def generate_lig_inter_features(smiles):
+def generate_lig_inter_features(smiles): #Intermolecular Ligand, input smiles ligand, returns np array
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
+    
     features = []
+    
     try:
+        #Hydrogen Bonding,
         features.append(Lipinski.NumHDonors(mol))
         features.append(Lipinski.NumHAcceptors(mol))
         features.append(Lipinski.NHOHCount(mol))
         features.append(Lipinski.NOCount(mol))
-        features.append(rdMolDescriptors.CalcNumHBD(mol))
-        features.append(rdMolDescriptors.CalcNumHBA(mol))
-        features.append(Descriptors.MaxPartialCharge(mol))
-        features.append(Descriptors.MinPartialCharge(mol))
-        features.append(Descriptors.MaxAbsPartialCharge(mol))
-        features.append(Descriptors.MaxPartialCharge(mol) - Descriptors.MinPartialCharge(mol))
+        features.append(rdMolDescriptors.CalcNumHBD(mol)) #includes N, O, and S (manual edit)
+        features.append(rdMolDescriptors.CalcNumHBA(mol)) #includes N, O, and S (manual edit)
+        
+        #Electrostatic bonding
+        #Partial charge = the small positive or negative charge assigned to each atom due to unequal sharing of electrons in bonds (like in polar bond
+        features.append(Descriptors.MaxPartialCharge(mol)) #highest partial charge among all atoms in the molecule (most positive atom), (likely electrophilic)
+        features.append(Descriptors.MinPartialCharge(mol)) #highest partial charge among all atoms in the molecule (most negative atom), (likely nucleophilic)
+        features.append(Descriptors.MaxAbsPartialCharge(mol)) #largest absolute value of partial charge among all atom, strongest charge polarization within the molecule
+        features.append(Descriptors.MaxPartialCharge(mol) - Descriptors.MinPartialCharge(mol)) #difference between most positive and most negative atoms), larger values mean stronger polarity within the molecule.
         features.append(Descriptors.MinAbsPartialCharge(mol))
-        features.append(MolSurf.TPSA(mol))
-        features.append(MolSurf.LabuteASA(mol))
-        features.append(Crippen.MolMR(mol))
-        features.append(Descriptors.MolWt(mol))
+        
+        #Polar surface
+        features.append(MolSurf.TPSA(mol))#The sum of the surface areas of all polar atoms (mostly oxygen and nitrogen) and their attached hydrogens.High TPSA â†’ more polar, less membrane permeable, more soluble, Low TPSA â†’ less polar, more membrane permeable (good for oral drugs)
+        
+        features.append(MolSurf.LabuteASA(mol))#An approximation of the total solvent-accessible surface area (SASA) of the molecule, calculated using Labuteâ€™s algorithm. #Reflects molecular size and hydrophobic surface exposure
+        #Aiâ€‹=Siâ€‹â‹…Piâ€‹, S = 4Ï€r^2i , Piâ€‹=1âˆ’jâˆâ€‹(1âˆ’fij
+        # S=total spherical surface area of atom , Pi=atomic solvation parameter, fij=fraction of atom i's surface area in contact with atom j
+
+        features.append(Crippen.MolMR(mol))#The Ghose-Crippen formula is an atom-contribution method used to estimate the octanol-water partition coefficient (log P) and molar refractivity (MR) of a molecule.
+        #Molar refractivity, a measure of the polarizability of the molecule
+        
+        #Size & Rigidity  (#May overlap with others)
+        features.append(Descriptors.MolWt(mol)) #molecular weight
         features.append(Lipinski.HeavyAtomCount(mol))
         features.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+        
         features.append(Crippen.MolLogP(mol))
-        features.append(Descriptors.FractionCSP3(mol))
+        features.append(Descriptors.FractionCSP3(mol)) # fraction of SP3 hybridised carbons
         features.append(Lipinski.NumAromaticRings(mol))
         aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
         features.append(aromatic_atoms)
+        
+        # Pi-Pi stacking 
         features.append(Descriptors.NumAromaticCarbocycles(mol))
         features.append(Descriptors.NumAromaticHeterocycles(mol))
+
+        #Halogen
         features.append(Fragments.fr_halogen(mol))
+
+        #Flexibility
         features.append(Lipinski.NumRotatableBonds(mol))
+
         return np.array(features)
+        
     except Exception as e:
-        logger.warning(f"Error in lig_inter: {e}")
+        print(f"Error in lig_inter: {str(e)}")
         return None
 
 
-def generate_mut_inter_features(smiles):
+def generate_mut_inter_features(smiles): #Intermolecular Mutation, input smiles mutation, returns np array
     return generate_lig_inter_features(smiles)
 
 
-def generate_lig_intra_features(smiles):
+#Subsequent priority of descriptors to capture features from intramolecular forces 
+def generate_lig_intra_features(smiles): #Intramolecular Ligand
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
+    
     features = []
+    
     try:
+        #Covalent bond
         num_bonds = mol.GetNumBonds()
         features.append(num_bonds)
+        
+        #higher order bonds favours intramolecular forces within molecule, bond order indicates strength of bond
         single_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 1.0)
         double_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 2.0)
         triple_bonds = sum(1 for bond in mol.GetBonds() if bond.GetBondTypeAsDouble() == 3.0)
         aromatic_bonds = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
         features.extend([single_bonds, double_bonds, triple_bonds, aromatic_bonds])
+        
         avg_bond_order = np.mean([bond.GetBondTypeAsDouble() for bond in mol.GetBonds()]) if num_bonds > 0 else 0
         features.append(avg_bond_order)
+        
+        #Rigidity (May Overlap), flexibility indicates less intramolecular forces within molecule
         features.append(Lipinski.NumRotatableBonds(mol))
         features.append(Lipinski.RingCount(mol))
         features.append(Lipinski.NumAromaticRings(mol))
+        
         rigid_bonds = sum(1 for bond in mol.GetBonds() if bond.IsInRing())
         fraction_rigid = rigid_bonds / num_bonds if num_bonds > 0 else 0
         features.append(fraction_rigid)
+        
+        # Pi-Pi bonding 
         features.append(Descriptors.NumAromaticCarbocycles(mol))
         features.append(Descriptors.NumAromaticHeterocycles(mol))
-        sp2 = sum(1 for a in mol.GetAtoms() if a.GetHybridization() == Chem.HybridizationType.SP2)
-        sp3 = sum(1 for a in mol.GetAtoms() if a.GetHybridization() == Chem.HybridizationType.SP3)
-        sp = sum(1 for a in mol.GetAtoms() if a.GetHybridization() == Chem.HybridizationType.SP)
-        features.extend([sp, sp2, sp3])
+        
+        #Hybridization (May Overlap), branching indicates less intramolecular forces within molecule
+        sp2_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP2)
+        sp3_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP3)
+        sp_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetHybridization() == Chem.HybridizationType.SP)
+        features.extend([sp_carbons, sp2_carbons, sp3_carbons])
+        
+        #Ring strain
         ring_sizes = [len(ring) for ring in mol.GetRingInfo().AtomRings()]
         avg_ring_size = np.mean(ring_sizes) if ring_sizes else 0
         min_ring_size = min(ring_sizes) if ring_sizes else 0
         features.extend([avg_ring_size, min_ring_size])
-        three_member = sum(1 for s in ring_sizes if s == 3)
-        four_member = sum(1 for s in ring_sizes if s == 4)
-        features.extend([three_member, four_member])
+        
+        three_member_rings = sum(1 for size in ring_sizes if size == 3)
+        four_member_rings = sum(1 for size in ring_sizes if size == 4)
+        features.extend([three_member_rings, four_member_rings])
+        
+        #Complexity
         features.append(GraphDescriptors.BertzCT(mol))
         features.append(GraphDescriptors.Kappa1(mol))
         features.append(GraphDescriptors.Kappa2(mol))
         features.append(GraphDescriptors.Kappa3(mol))
         features.append(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
         features.append(rdMolDescriptors.CalcNumSpiroAtoms(mol))
+        
         return np.array(features)
+        
     except Exception as e:
-        logger.warning(f"Error in lig_intra: {e}")
+        print(f"Error in lig_intra: {str(e)}")
         return None
 
 
-def generate_mut_intra_features(smiles):
+def generate_mut_intra_features(smiles): # Intramolecular Mutation
     return generate_lig_intra_features(smiles)
 
-
-def calculate_similarity_metrics(vec1, vec2):
-    norm1, norm2 = norm(vec1), norm(vec2)
+def calculate_similarity_metrics(vec1, vec2): #input np arrays, returns a dict with math metrics
+    # 1. Calculate Cosine Similarity with safety check
+    norm1 = norm(vec1)
+    norm2 = norm(vec2)
+    
     if norm1 == 0 or norm2 == 0:
-        return {'cosine_similarity': 0.0, 'sine_dissimilarity': 0.0, 'dot_product': 0.0}
+        # If either vector has zero norm, return default values
+        return {
+            'cosine_similarity': 0.0,
+            'sine_dissimilarity': 0.0,
+            'dot_product': 0.0
+        }
+    
     cosine_sim = np.dot(vec1, vec2) / (norm1 * norm2)
-    sine_of_angle = np.sqrt(max(0, 1 - cosine_sim**2))
-    return {'cosine_similarity': cosine_sim, 'sine_dissimilarity': sine_of_angle, 
-            'dot_product': np.dot(vec1, vec2)}
+    sine_of_angle = np.sqrt(1 - cosine_sim**2)
+
+    #logger.info(f"Cosine Similarity: {cosine_sim}, Sine dssimilarity: {sine_of_angle}, Dot Product: {np.dot(vec1, vec2)}")
+    
+    return {
+        'cosine_similarity': cosine_sim,
+        'sine_dissimilarity': sine_of_angle,
+        'dot_product': np.dot(vec1, vec2)
+    }
 
 
-def calculate_fp_metrics(smiles1, smiles2):
-    mol1, mol2 = Chem.MolFromSmiles(smiles1), Chem.MolFromSmiles(smiles2)
+def calculate_fp_metrics(smiles1, smiles2): #input smiles, returns dict with rdkit datastructs similarity
+    mol1 = Chem.MolFromSmiles(smiles1)
+    mol2 = Chem.MolFromSmiles(smiles2)
+    
     if mol1 is None or mol2 is None:
         return {'dice_sim': 0.0, 'tanimato': 0.0}
+    
     fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, 2, nBits=2048)
     fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, 2, nBits=2048)
-    return {'dice_sim': DataStructs.DiceSimilarity(fp1, fp2), 
-            'tanimato': DataStructs.TanimotoSimilarity(fp1, fp2)}
+    
+    dice_sim = DataStructs.DiceSimilarity(fp1, fp2)
+    tanimato = DataStructs.TanimotoSimilarity(fp1, fp2)
+
+    #logger.info(f"Dice Similarity: {dice_sim}, Tanimoto Similarity: {tanimato}")
+
+    
+    return {
+        'dice_sim': dice_sim,
+        'tanimato': tanimato,
+    }
 
 
-def generate_inter_interaction_features(lig_inter, mut_inter):
+def generate_inter_interaction_features(lig_inter, mut_inter): #similarity on intermolecular interactions ligand and mutation
+    features = []
     metrics = calculate_similarity_metrics(lig_inter, mut_inter)
-    return np.array([metrics['cosine_similarity'], metrics['sine_dissimilarity']])
+    
+    features.append(metrics['cosine_similarity'])
+    features.append(metrics['sine_dissimilarity'])
+    
+    return np.array(features)
 
 
-def generate_intra_interaction_features(lig_intra, mut_intra):
+def generate_intra_interaction_features(lig_intra, mut_intra): #similarity on intramolecular interactions ligand and mutation
+    features = []
     metrics = calculate_similarity_metrics(lig_intra, mut_intra)
-    return np.array([metrics['cosine_similarity'], metrics['sine_dissimilarity']])
+    
+    features.append(metrics['cosine_similarity'])
+    features.append(metrics['sine_dissimilarity'])
+    
+    return np.array(features)
 
 
-def generate_final_interaction_features(lig_smiles, mut_smiles):
-    fp_metrics = calculate_fp_metrics(lig_smiles, mut_smiles)
-    return np.array([fp_metrics['dice_sim'], fp_metrics['tanimato']])
+def generate_final_interaction_features(lig_smiles, mut_smiles): # fingerprints, morgan fingerprints dominate
+    features = []
+    
+    fp_inter_metrics = calculate_fp_metrics(lig_smiles, mut_smiles)
+    features.extend([fp_inter_metrics['dice_sim'], fp_inter_metrics['tanimato']])
+    
+    return np.array(features)
 
 
-def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra):
+def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra): 
+    """Generate custom intermolecular and intramolecular features with safe division"""
     lig_mut_inter = []
     lig_mut_intra = []
-    lig_mut_mix = []
+    lig_mut_mix_inter_intra = []
     
-    # H-bonding features
-    lig_mut_inter.append(safe_divide(lig_inter[0] * mut_inter[1], mut_inter[0]))
-    lig_mut_inter.append(safe_divide(lig_inter[4] * mut_inter[5], mut_inter[4]))
-    lig_mut_mix.append(safe_divide(safe_divide(lig_inter[0]*mut_inter[1], mut_inter[0]), mut_intra[21]))
-    lig_mut_inter.append(safe_divide(lig_inter[0]*mut_inter[1], lig_inter[1]) + 
-                         safe_divide(lig_inter[1]*mut_inter[0], mut_inter[1]))
-    lig_mut_inter.append(safe_divide(lig_inter[4]*mut_inter[5], lig_inter[4]) + 
-                         safe_divide(lig_inter[5]*mut_inter[4], mut_inter[5]))
-    lig_mut_inter.append(safe_divide(lig_inter[0], lig_inter[1]) + 
-                         safe_divide(mut_inter[1], mut_inter[0]))
-    lig_mut_inter.append(safe_divide(lig_inter[4], lig_inter[5]) + 
-                         safe_divide(mut_inter[5], mut_inter[4]))
+    # H attraction ligand , H = lig_hbd . mut_hba / mut_hbd 
+    # (#assumption: ligand moves to mut (mut is fixed position), lig hbd and mut hba attracts ligand), 
+    # mut hbd repels favouring intra bond within mut, ignoring intra bond repelling from ligand
+    H_linear_lipinski = safe_divide(lig_inter[0] * mut_inter[1], mut_inter[0], default=0.0)
+    lig_mut_inter.append(H_linear_lipinski)
     
-    # Electrostatic features
-    lig_mut_mix.append(safe_divide(lig_inter[6], lig_intra[14]) * safe_divide(mut_inter[7], mut_intra[14]))
-    lig_mut_mix.append(safe_divide(lig_inter[7], lig_intra[14]) * safe_divide(mut_inter[6], mut_intra[14]))
-    c_l1 = safe_divide(lig_inter[6], lig_intra[14]) * safe_divide(mut_inter[7], mut_intra[14])
-    c_l2 = safe_divide(lig_inter[7], lig_intra[14]) * safe_divide(mut_inter[6], mut_intra[14])
-    lig_mut_mix.append(c_l1**2 + c_l2**2)
+    H_linear_total = safe_divide(lig_inter[4] * mut_inter[5], mut_inter[4], default=0.0)
+    lig_mut_inter.append(H_linear_total)
     
-    lig_mut_inter.append((lig_inter[6] - mut_inter[7]) - (mut_inter[6] - lig_inter[7]))
-    lig_mut_inter.append(lig_inter[11] - mut_inter[11])
-    lig_mut_inter.append(lig_inter[17] - mut_inter[17])
-    lig_mut_inter.append(safe_divide(lig_inter[11]*mut_inter[11], lig_inter[17]*mut_inter[17]))
+    # H attraction ligand , H = lig_hbd . mut_hba / mut_hbd with weighted mut bond path (Kappa)
+    # (#assumption: ligand moves to mut (mut is fixed position), lig hbd and mut hba attracts ligand), 
+    # mut hbd repels favouring intra bond within mut
+    H_path = safe_divide(safe_divide(lig_inter[0] * mut_inter[1], mut_inter[0], default=0.0), mut_intra[21], default=0.0)
+    lig_mut_mix_inter_intra.append(H_path)
     
-    # Pi-pi stacking
-    lig_mut_mix.append(safe_divide(lig_inter[21]+lig_inter[22]+mut_inter[21]+mut_inter[22], 
-                                   lig_intra[15]+mut_intra[15]))
-    lig_mut_mix.append(safe_divide(lig_inter[21]+lig_inter[22]+mut_inter[21]+mut_inter[22], 
-                                   lig_intra[22]+mut_intra[22]))
+    # Streght H bond in intermolecular lig to mut minus mut intra bond within mut Lig(x1,y1) Mut(x2,y2)
+    # total attraction H_stregth , Lig(x1y1) Mut(x2,y2) , (lig_x1 * mut_y2 / lig_x2) + (lig_x2 * mut_y1 / mut_y2)
+    # inter bond attarct x1y2 , intra bond forming assumed as repelled, x1/y1 , assumed no repelling inter H bonds
+    H_strength = safe_divide(lig_inter[0] * mut_inter[1], lig_inter[1], default=0.0) + safe_divide(lig_inter[1] * mut_inter[0], mut_inter[1], default=0.0)
+    lig_mut_inter.append(H_strength)
     
-    # Bond rigidity
-    bond_rigid = (safe_divide(lig_intra[2]+lig_intra[3]+lig_intra[4], lig_intra[0]) + 
-                  safe_divide(mut_intra[2]+mut_intra[3]+mut_intra[4], mut_intra[0]))
-    bond_single = safe_divide(lig_intra[1], lig_intra[0]) + safe_divide(mut_intra[1], mut_intra[0])
-    lig_mut_intra.append((bond_single - bond_rigid)**2)
+    H_strength_total = safe_divide(lig_inter[4] * mut_inter[5], lig_inter[4], default=0.0) + safe_divide(lig_inter[5] * mut_inter[4], mut_inter[5], default=0.0)
+    lig_mut_inter.append(H_strength_total)
     
-    # Hybridization
-    hyb_lig = safe_divide(lig_intra[12]+lig_intra[13], lig_intra[14]+lig_intra[12]+lig_intra[13])
-    hyb_mut = safe_divide(mut_intra[12]+mut_intra[13], mut_intra[14]+mut_intra[12]+mut_intra[13])
-    lig_mut_intra.append((hyb_mut - hyb_lig)**2)
-    lig_mut_intra.append(safe_divide(lig_intra[21], mut_intra[21]))
+    # Lig donating stregght + Mut accepting Stregth , ligand movving to mut
+    H_frac_lipinski = safe_divide(lig_inter[0], lig_inter[1], default=0.0) + safe_divide(mut_inter[1], mut_inter[0], default=0.0)
+    lig_mut_inter.append(H_frac_lipinski)
     
-    return lig_mut_inter, lig_mut_intra, lig_mut_mix
+    H_frac_total = safe_divide(lig_inter[4], lig_inter[5], default=0.0) + safe_divide(mut_inter[5], mut_inter[4], default=0.0)
+    lig_mut_inter.append(H_frac_total)
+    
 
+    #using max positive and max negative charge, and length and size is simple number of bonds  (q1q2/r2)
+    # Attraction opp site charge lig(q1/r1) * mut(q2/r2), q1 is max positive and q2 is max neg
+    # size options include: Molwt, number of bonds, Euclidean distance . radius of gyration (rdMolDescriptors.CalcRadiusOfGyration(mol))
 
-def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series, ligand_cache=None, mutation_cache=None):
+    # Assumption: non moving mutant, only ligand moving to mutant through attraction charge Only, (taking max abs postive and min ngeative)
+    # only Attraction intermolecular forces, assuming no intrabond attraction within molecule. Assumed no repelling intermolecule same charge
+    #A c_linear q1 pos to q2 neg / r1r2 
+    # B c_linear q1 neg to q2 pos/r1r2
+    #total & ratio
+
+    # assuming got positive charges ligand and negative charge mut with weighted size molwt
+    c_linear1_size1 = safe_divide(lig_inter[6], lig_inter[14], default=0.0) * safe_divide(mut_inter[7], mut_inter[14], default=0.0)
+    lig_mut_mix_inter_intra.append(c_linear1_size1)
+    
+    c_linear2_size1 = safe_divide(lig_inter[7], lig_inter[14], default=0.0) * safe_divide(mut_inter[6], mut_inter[14], default=0.0)
+    lig_mut_mix_inter_intra.append(c_linear2_size1)
+    
+    c_total = (c_linear1_size1 ** 2) + (c_linear2_size1 ** 2) #bringing out magnitude of each attarction parts
+    lig_mut_mix_inter_intra.append(c_total)
+    
+    #difference between pos lig neg mut to neg mut pos lig
+    c_diff = ((lig_inter[6]) - (mut_inter[7])) - ((mut_inter[6]) - (lig_inter[7]))
+    lig_mut_inter.append(c_diff)
+    
+    #difference between pos lig neg mut to neg mut pos lig
+    c_tpsa_diff = lig_inter[11] - mut_inter[11]
+    lig_mut_inter.append(c_tpsa_diff)
+    
+    c_crip_logh = lig_inter[17] - mut_inter[17]
+    lig_mut_inter.append(c_crip_logh)
+    
+    frac_tpsa_logH = safe_divide(lig_inter[11] * mut_inter[11], lig_inter[17] * mut_inter[17], default=0.0)
+    lig_mut_inter.append(frac_tpsa_logH)
+    
+    #pi-pi stacking ratio
+    pi_pi_ratio1 = safe_divide(lig_inter[21] + lig_inter[22] + mut_inter[21] + mut_inter[22], lig_intra[15] + mut_intra[15], default=0.0)
+    lig_mut_mix_inter_intra.append(pi_pi_ratio1)
+    
+    pi_pi_ratio2 = safe_divide(lig_inter[21] + lig_inter[22] + mut_inter[21] + mut_inter[22], lig_intra[22] + mut_intra[22], default=0.0)
+    lig_mut_mix_inter_intra.append(pi_pi_ratio2)
+    
+    #Bringing out difference between a more rigid/loose ligand 
+
+    #double/triple bond ratio increasing
+    # bond rigid total double, triple n aromatic over total num of bonds (tighter intra lig and intra mut strength as a total)
+    # bond single (looser intra lig and intra mut strength)
+    bond_rigid = safe_divide(lig_intra[2] + lig_intra[3] + lig_intra[4], lig_intra[0], default=0.0) + safe_divide(mut_intra[2] + mut_intra[3] + mut_intra[4], mut_intra[0], default=0.0)
+    bond_single = safe_divide(lig_intra[1], lig_intra[0], default=0.0) + safe_divide(mut_intra[1], mut_intra[0], default=0.0)
+    bond_diff = (bond_single - bond_rigid) ** 2
+    lig_mut_intra.append(bond_diff)
+    
+    #spsp2/sp3 ratio
+    # fraction of spsp2/sp3 between ligand and mutant
+    # bigger difference indicate mutants more loose, ligands are same
+    hybridisation_lig = safe_divide(lig_intra[12] + lig_intra[13], lig_intra[14] + lig_intra[12] + lig_intra[13], default=0.0)
+    hybridisation_mut = safe_divide(mut_intra[12] + mut_intra[13], mut_intra[14] + mut_intra[12] + mut_intra[13], default=0.0)
+    hybridisation_diff = (hybridisation_mut - hybridisation_lig) ** 2
+    lig_mut_intra.append(hybridisation_diff)
+    
+    kappa_ratio = safe_divide(lig_intra[21], mut_intra[21], default=0.0)
+    lig_mut_intra.append(kappa_ratio)
+    
+    return lig_mut_inter, lig_mut_intra, lig_mut_mix_inter_intra
+
+def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series):
     print('\nGenerating hierarchical features...')
-    if ligand_cache is None:
-        ligand_cache = {}
-    if mutation_cache is None:
-        mutation_cache = {}
-    interaction_cache = {}
+    ligand_cache, mutation_cache, interaction_cache = {}, {}, {}
     
     results = {k: [] for k in ['lig_inter', 'mut_inter', 'inter_interaction', 'lig_intra', 
                                 'mut_intra', 'intra_interaction', 'lig_mut_mix_inter_intra', 
@@ -679,16 +753,14 @@ def generate_hierarchical_features(ligand_smiles_series, mutation_smiles_series,
             lig_inter, lig_intra = ligand_cache[lig_smi]
         else:
             lig_inter, lig_intra = _generate_lig_features(lig_smi)
-            if lig_inter is not None and lig_intra is not None:
-                ligand_cache[lig_smi] = (lig_inter, lig_intra)
-
+            ligand_cache[lig_smi] = (lig_inter, lig_intra)
+        
         # Cache mutation features
         if mut_smi in mutation_cache:
             mut_inter, mut_intra = mutation_cache[mut_smi]
         else:
             mut_inter, mut_intra = _generate_lig_features(mut_smi)
-            if mut_inter is not None and mut_intra is not None:
-                mutation_cache[mut_smi] = (mut_inter, mut_intra)
+            mutation_cache[mut_smi] = (mut_inter, mut_intra)
         
         if any(f is None for f in [lig_inter, mut_inter, lig_intra, mut_intra]):
             continue
@@ -870,9 +942,8 @@ def build_priority_hierarchical_model(feature_dims):
     x = Dense(32, kernel_initializer='he_normal', name='integration_dense3')(x)
     x = LeakyReLU(alpha=0.1, name='integration_leaky3')(x)
     
-    # Embedding layer for RNN
-    embedding_layer = Dense(16, kernel_initializer='he_normal', name='embedding_layer')(x)
-    embedding_output = LeakyReLU(alpha=0.1, name='embedding_output')(embedding_layer)
+    # Embedding layer for RNN — tanh bounds outputs to [-1,1] for LSTM/GRU stability
+    embedding_output = Dense(16, activation='tanh', kernel_initializer='glorot_uniform', name='embedding_output')(x)
     
     # Output heads
     activity_head = Dense(8, kernel_initializer='he_normal', name='activity_head')(embedding_output)
@@ -959,35 +1030,28 @@ def build_rnn_sequential_model(embedding_dim, n_timesteps=6):
 # Main Workflow
 # =============================================================================
 
-def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=None):
+def keras_main(output_dir='.', train_data_path=None, control_data_path=None, drug_data_path=None):
     """Full training workflow with predictions on control and drug datasets."""
     os.makedirs(output_dir, exist_ok=True)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if train_data is None:
-        train_data = os.path.join(script_dir, '..', 'data', 'df_3_shuffled.csv')
-    if control_data is None:
-        control_data = os.path.join(script_dir, '..', 'data', 'egfr_tki_valid_cleaned.csv')
-    if drug_data is None:
-        drug_data = os.path.join(script_dir, '..', 'data', 'drugs.csv')
+    os.chdir(output_dir)
 
     print("\n" + "="*80)
     print("FULL TRAINING MODE")
     print("="*80)
 
     # Load datasets
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
+    if train_data_path is None:
+        train_data_path = os.path.join(data_dir, 'df_3_shuffled.csv')
+    if control_data_path is None:
+        control_data_path = os.path.join(data_dir, 'egfr_tki_valid_cleaned.csv')
+    if drug_data_path is None:
+        drug_data_path = os.path.join(data_dir, 'drugs.csv')
+
     print("\nLoading datasets...")
-    try:
-        df_train = pd.read_csv(train_data)
-    except UnicodeDecodeError:
-        df_train = pd.read_csv(train_data, encoding='latin-1')
-    try:
-        df_control = pd.read_csv(control_data)
-    except UnicodeDecodeError:
-        df_control = pd.read_csv(control_data, encoding='latin-1')
-    try:
-        df_drugs = pd.read_csv(drug_data)
-    except UnicodeDecodeError:
-        df_drugs = pd.read_csv(drug_data, encoding='latin-1')
+    df_train = pd.read_csv(train_data_path, encoding='latin-1')
+    df_control = pd.read_csv(control_data_path, encoding='latin-1')
+    df_drugs = pd.read_csv(drug_data_path, encoding='latin-1')
     
     df_train.columns = df_train.columns.str.strip()
     
@@ -1004,7 +1068,21 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
         df_train['dock'].isna()
     )
     df_train_valid = df_train[valid_mask].reset_index(drop=True)
-    
+
+    # Save unique mutation profiles — required by prediction script
+    _profile_cols = [
+        'smiles_full_egfr', 'smiles 718_862_atp_pocket', 'smiles_p_loop',
+        'smiles_c_helix', 'smiles_l858r_a_loop_dfg_motif',
+        'smiles_catalytic_hrd_motif', 'tkd'
+    ]
+    mutation_profiles = (
+        df_train_valid[_profile_cols]
+        .drop_duplicates(subset=['tkd'])
+        .reset_index(drop=True)
+    )
+    mutation_profiles.to_csv('mutation_profiles.csv', index=False)
+    print(f"OK Saved {len(mutation_profiles)} mutation profiles → mutation_profiles.csv")
+
     print(f"Training samples: {len(df_train_valid)}/{len(df_train)}")
     print(f"Control samples: {len(df_control)}")
     print(f"Drug samples: {len(df_drugs)}")
@@ -1039,8 +1117,13 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
         logger.success("MolCLR pre-trained weights loaded successfully!")
     else:
         logger.warning(f"Pre-trained weights not found at {pretrained_path}")
-        logger.warning("Using randomly initialized GNN weights")
-        sys.exit(1)
+        logger.warning("Continuing with randomly initialized GNN weights. "
+                       "Set pretrained_path correctly for production use.")
+
+    # Save the GNN weights used (pretrained or random) so the prediction script
+    # loads the identical weights and its gnn_embedding_scalers remain valid
+    torch.save(gnn_model.state_dict(), 'gnn_pretrained.pth')
+    logger.info("GNN weights saved → gnn_pretrained.pth")
         
     # Extract ligand GNN embeddings
     print("\nExtracting GNN embeddings for training ligands...")
@@ -1061,13 +1144,10 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
     # Collect common valid indices across all sites
     all_feature_dicts = []
     all_valid_indices = []
-
-    _persistent_ligand_cache = {}
-    _persistent_mutation_cache = {}
-
+    
     for site_name, site_col in mutation_sites:
         print(f"\n--- Generating features for {site_name} ---")
-        feature_dict = generate_hierarchical_features(df_train_valid['smiles'], df_train_valid[site_col], ligand_cache=_persistent_ligand_cache, mutation_cache=_persistent_mutation_cache)
+        feature_dict = generate_hierarchical_features(df_train_valid['smiles'], df_train_valid[site_col])
         all_feature_dicts.append(feature_dict)
         all_valid_indices.append(set(feature_dict['valid_indices']))
     
@@ -1141,7 +1221,7 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
         model = build_priority_hierarchical_model(feature_dims)
         
         # Training callbacks
-        checkpoint = ModelCheckpoint(os.path.join(output_dir, f'gnn_hierarchical_{site_name}.h5'),
+        checkpoint = ModelCheckpoint(f'gnn_hierarchical_{site_name}.h5', 
                                      monitor='val_loss', save_best_only=True, verbose=1)
         early_stop = EarlyStopping(monitor='val_loss', patience=30, 
                                    restore_best_weights=True, verbose=1)
@@ -1178,7 +1258,7 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
     
     rnn_model = build_rnn_sequential_model(embedding_dim=16, n_timesteps=6)
     
-    rnn_checkpoint = ModelCheckpoint(os.path.join(output_dir, 'gnn_rnn_model.h5'), monitor='val_loss',
+    rnn_checkpoint = ModelCheckpoint('gnn_rnn_model.h5', monitor='val_loss', 
                                      save_best_only=True, verbose=1)
     rnn_early_stop = EarlyStopping(monitor='val_loss', patience=40, 
                                    restore_best_weights=True, verbose=1)
@@ -1196,21 +1276,13 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
     print("OK RNN training complete")
     
     # Save scalers
-    with open(os.path.join(output_dir, 'gnn_feature_scalers.pkl'), 'wb') as f:
+    with open('gnn_feature_scalers.pkl', 'wb') as f:
         pickle.dump(all_scalers, f)
-    with open(os.path.join(output_dir, 'gnn_y_scalers.pkl'), 'wb') as f:
+    with open('gnn_y_scalers.pkl', 'wb') as f:
         pickle.dump({'y_scaler1': y_scaler1, 'y_scaler2': y_scaler2}, f)
-    with open(os.path.join(output_dir, 'gnn_embedding_scalers.pkl'), 'wb') as f:
+    with open('gnn_embedding_scalers.pkl', 'wb') as f:
         pickle.dump(all_gnn_scalers, f)
-
-    # Save mutation profiles for inference
-    profile_cols = ['smiles_full_egfr', 'smiles 718_862_atp_pocket', 'smiles_p_loop',
-                    'smiles_c_helix', 'smiles_l858r_a_loop_dfg_motif',
-                    'smiles_catalytic_hrd_motif', 'tkd']
-    unique_profiles = df_train_valid[profile_cols].drop_duplicates(subset=['tkd']).reset_index(drop=True)
-    unique_profiles.to_csv(os.path.join(output_dir, 'mutation_profiles.csv'), index=False)
-    print(f"Saved mutation_profiles.csv ({len(unique_profiles)} profiles)")
-
+    
     # Save training plot
     print("\nSaving training plot...")
     try:
@@ -1243,26 +1315,21 @@ def keras_main(output_dir='.', train_data=None, control_data=None, drug_data=Non
         plt.legend()
 
         plt.tight_layout()
-        out_png = os.path.join(output_dir, 'gnn_training_history.png')
+        out_png = 'gnn_training_history.png'
         plt.savefig(out_png, dpi=200)
         print(f'Saved training history plot to {out_png}')
     except Exception as e:
         print('Could not generate training plot:', e)
     
     # Predictions on control and drugs
-    predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
-                        all_gnn_scalers, y_scaler1, y_scaler2, rnn_model,
-                        mutation_sites, df_train_valid, output_dir=output_dir)
-
-    print(f"\n--- Feature Cache Stats ---")
-    print(f"  Disk cache hits:   {_cache_hits}")
-    print(f"  Disk cache misses: {_cache_misses}")
-    print(f"  Cache directory:   {os.path.abspath(_CACHE_DIR)}")
+    predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers, 
+                        all_gnn_scalers, y_scaler1, y_scaler2, rnn_model, 
+                        mutation_sites, df_train_valid)
 
 
 def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                         all_gnn_scalers, y_scaler1, y_scaler2, rnn_model,
-                        mutation_sites, df_train_valid, output_dir='.'):
+                        mutation_sites, df_train_valid):
     """Generate predictions on control and drug datasets."""
     
     # Get unique mutation profiles
@@ -1291,8 +1358,7 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
             
             for site_idx, (site_name, site_col) in enumerate(mutation_sites):
                 mut_smi = profile[site_col]
-                mut_inter = generate_mut_inter_features(mut_smi)
-                mut_intra = generate_mut_intra_features(mut_smi)
+                mut_inter, mut_intra = _generate_lig_features(mut_smi)
                 
                 if mut_inter is None or mut_intra is None:
                     break
@@ -1303,8 +1369,7 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                 site_valid = []
                 
                 for idx, comp_smi in enumerate(compound_smiles):
-                    lig_inter = generate_lig_inter_features(comp_smi)
-                    lig_intra = generate_lig_intra_features(comp_smi)
+                    lig_inter, lig_intra = _generate_lig_features(comp_smi)
                     if lig_inter is None or lig_intra is None:
                         continue
                     
@@ -1344,7 +1409,7 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                 gnn_concat = np.concatenate([comp_gnn, mut_gnn], axis=1)
                 gnn_scaled = all_gnn_scalers[site_idx].transform(gnn_concat)
                 
-                hier_model = load_model(os.path.join(output_dir, f'gnn_hierarchical_{site_name}.h5'), compile=False)
+                hier_model = load_model(f'gnn_hierarchical_{site_name}.h5', compile=False)
                 emb_model = Model(inputs=hier_model.inputs, 
                                   outputs=hier_model.get_layer('embedding_output').output)
                 
@@ -1373,7 +1438,7 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
                     'predicted_docking': float(docking[i][0])
                 })
         
-        output_file = os.path.join(output_dir, f'gnn_{dataset_name.lower()}_predictions.csv')
+        output_file = f'gnn_{dataset_name.lower()}_predictions.csv'
         pd.DataFrame(results).to_csv(output_file, index=False)
         print(f"OK Saved {output_file} ({len(results)} rows)")
     
@@ -1384,21 +1449,21 @@ def predict_on_datasets(df_control, df_drugs, gnn_model, device, all_scalers,
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='MolCLR-GNN Hierarchical Model')
-    parser.add_argument('--test', action='store_true', help='Run test mode')
-    parser.add_argument('--n_samples', type=int, default=5, help='Test samples')
+    parser = argparse.ArgumentParser(description='MolCLR-GNN Hierarchical Model (Corrected)')
     parser.add_argument('--output_dir', type=str, default='.', help='Directory to save all outputs')
     parser.add_argument('--train_data', type=str, default=None, help='Training CSV path')
     parser.add_argument('--control_data', type=str, default=None, help='Control compounds CSV path')
     parser.add_argument('--drug_data', type=str, default=None, help='Drug compounds CSV path')
+    parser.add_argument('--test', action='store_true', help='Run test mode')
+    parser.add_argument('--n_samples', type=int, default=5, help='Test samples')
     args = parser.parse_args()
 
     if args.test:
         success = test_mode(n_samples=args.n_samples)
         sys.exit(0 if success else 1)
     else:
-        keras_main(output_dir=args.output_dir, train_data=args.train_data,
-                   control_data=args.control_data, drug_data=args.drug_data)
+        keras_main(output_dir=args.output_dir, train_data_path=args.train_data,
+                   control_data_path=args.control_data, drug_data_path=args.drug_data)
 
 #TODO
 # 1. Conduct fine tuning using generated embedddings from of ligand and mutants in df_train dataset 
