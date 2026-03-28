@@ -3,3 +3,11 @@ __pycache__/
 *.txt
 */data/
 */experiments/
+*/experiments_v*/
+*/experiments_backup/
+*/checkpoints/
+.DS_Store
+**/.DS_Store
+*.h5
+*.pkl
+.feature_cache/
