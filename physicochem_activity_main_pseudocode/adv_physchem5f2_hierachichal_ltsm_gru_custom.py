@@ -424,7 +424,7 @@ def generate_custom_features(lig_inter, mut_inter, lig_intra, mut_intra):
     # B c_linear q1 neg to q2 pos/r1r2
     #total & ratio
 
-    # assuming got positive charges ligand and negative charge mut with weighted size molwt
+    # assuming got positive charges ligand and negative charge mut with weighted size sp3
     c_linear1_size1 = safe_divide(lig_inter[6], lig_intra[14], default=0.0) * safe_divide(mut_inter[7], mut_intra[14], default=0.0)
     lig_mut_mix_inter_intra.append(c_linear1_size1)
     
