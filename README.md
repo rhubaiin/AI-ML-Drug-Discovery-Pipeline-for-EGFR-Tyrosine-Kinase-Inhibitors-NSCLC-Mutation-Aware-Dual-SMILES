@@ -295,20 +295,6 @@ The **core custom model** of the pipeline.
 
 ---
 
-#### M2 — KAN B-Spline
-
-Replaces all dense layers with **Kolmogorov–Arnold Network** layers using **B-spline basis functions** (Cox-de Boor recursion).
-
-![M2 — Integrated RNN-LSTM-KAN (B-Spline) Hierarchical Model](assets/KAN_B_spline.png)
-
-```
-φ(x) = SiLU(x) · W_base + B_spline(x) · W_spline
-```
-
-The hierarchical priority structure and RNN-LSTM temporal integration are retained, but every Dense layer is replaced with a B-Spline KAN layer (SiLU-scaled linear term). In Part 2, the GRU path has dedicated B-Spline KAN layers integrated directly into the recurrent blocks. The integration layer uses a B-Spline KAN Integration Layer (BN, Dropout) in place of a standard Dense integration block.
-
----
-
 #### M3 — KAN Navier-Stokes Fourier Sinusoidal
 
 A dual-basis KAN variant combining two different KAN formulations.
@@ -321,27 +307,6 @@ A dual-basis KAN variant combining two different KAN formulations.
 y = Σ [aₖ·cos(kx) + bₖ·sin(kx)] + bias
 ```
 The Fourier KAN integration layer uses sinusoidal basis functions (Sinusoid/KAN Layer) replacing the standard dense integration block.
-
----
-
-#### M4 — ChemBERTa Cross-Attention
-
-Integrates **ChemBERTa** (pre-trained transformer for molecular SMILES) with **MultiHeadAttention** cross-attention layers.
-
-![M4 — Integrated RNN-LSTM Hierarchical Model with ChemBERTa Cross-Attention](assets/chemberta_02.png)
-
-ChemBERTa (768-dimensional embeddings) is extracted separately for both the ligand SMILES and the mutation SMILES. A **MultiHead Cross-Attention** block uses the ligand embedding as Query and the mutation embedding as Key/Value, with a residual connection and LayerNormalization (Chem Context block). This cross-attended chemical context is then used to enhance the P1 vector in the priority hierarchy via message passing. The downstream RNN-LSTM temporal model (Part 2) is identical to M1.
-
----
-
-#### M5 — GNN (Graph Isomorphism Network with Edge Features)
-
-Uses **GIN-E (Graph Isomorphism Network with Edge features)** from the MolCLR framework to generate **graph-level molecular embeddings** from atom and bond features.
-
-![M5 — Integrated GNN-RNN-LSTM Hierarchical Model](assets/GNN.png)
-
-- **Part 1 (GNN Hierarchical Model)** — A MolCLR pre-trained GINet GNN encoder produces 512-dim graph embeddings for both the ligand and the mutation SMILES. These are concatenated into a 1024-dim GNN embedding (standard scaled) which feeds into the priority hierarchy alongside hand-crafted RDKit features (fingerprints, custom features, similarity metrics). A **GNN Projector Head** (Dense 64 → 32 → 8, LeakyReLU + Tanh) maps GNN embeddings into the gating structure.
-- **Part 2 (GNN-Integrated RNN-LSTM)** — Both a 512-dim GNN sequence path and a 16-dim hand-crafted embedding path feed into BiLSTM and BiGRU blocks respectively. Their outputs are concatenated (Dim: 512 for LSTM path, Dim: 16 for GRU path) before the Dense Integration Layers. Includes a fallback MLP mode when `torch_geometric` is unavailable.
 
 ---
 
